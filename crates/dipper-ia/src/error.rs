@@ -35,8 +35,8 @@ pub enum Error {
     #[error("search error: {0}")]
     Search(String),
 
-    #[error("malformed torrent: {0}")]
-    Torrent(String),
+    #[error(transparent)]
+    Torrent(#[from] dipper_bt::Error),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

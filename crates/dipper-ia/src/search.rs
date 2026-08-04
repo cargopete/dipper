@@ -207,7 +207,7 @@ impl SearchPage {
             source,
         })?;
         if let Some(error) = resp.error {
-            return Err(Error::Torrent(format!("scrape API error: {error}")));
+            return Err(Error::Search(format!("scrape API error: {error}")));
         }
         let hits = resp
             .items

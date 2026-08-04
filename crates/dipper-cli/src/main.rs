@@ -239,7 +239,7 @@ async fn run(cli: Cli) -> Result<()> {
             let client = client(&cli)?;
             let item = metadata::fetch(&client, identifier).await?;
             let meta = torrent::fetch(&client, &item).await?;
-            println!("{}", meta.magnet());
+            println!("{}", meta.magnet_uri());
             Ok(())
         }
 
@@ -498,7 +498,7 @@ fn print_torrent(meta: &dipper_ia::Metainfo) {
     if !meta.webseeds.is_empty() {
         println!("webseeds:    {}", meta.webseeds.join("\n             "));
     }
-    println!("magnet:      {}", meta.magnet());
+    println!("magnet:      {}", meta.magnet_uri());
 }
 
 fn client(cli: &Cli) -> Result<IaClient> {

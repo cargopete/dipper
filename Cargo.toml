@@ -10,6 +10,7 @@ repository = "https://github.com/cargopete/dipper"
 rust-version = "1.85"
 
 [workspace.dependencies]
+dipper-bt = { path = "crates/dipper-bt", version = "0.1.0" }
 dipper-ia = { path = "crates/dipper-ia", version = "0.1.0" }
 dipper-index = { path = "crates/dipper-index", version = "0.1.0" }
 

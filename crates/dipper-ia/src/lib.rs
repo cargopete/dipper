@@ -10,7 +10,7 @@
 //!
 //! let item = metadata::fetch(&client, &hits[0].identifier).await?;
 //! let meta = torrent::fetch(&client, &item).await?;
-//! println!("{}", meta.magnet());
+//! println!("{}", meta.magnet_uri());
 //! # Ok(())
 //! # }
 //! ```

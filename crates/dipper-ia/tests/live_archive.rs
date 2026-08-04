@@ -35,7 +35,7 @@ async fn computed_infohash_matches_the_one_archive_org_publishes() {
 
     let meta = torrent::fetch(&client, &item).await.expect("torrent");
     assert_eq!(meta.info_hash_hex(), declared.to_lowercase());
-    assert!(meta.magnet().contains(&declared.to_lowercase()));
+    assert!(meta.magnet_uri().contains(&declared.to_lowercase()));
 }
 
 /// archive.org torrents should carry both trackers and at least one webseed,
@@ -60,7 +60,10 @@ async fn derived_torrents_carry_trackers_and_webseeds() {
         "webseeds should be upgraded to https: {:?}",
         meta.webseeds
     );
-    assert_eq!(meta.total_length, meta.files.iter().map(|f| f.length).sum::<u64>());
+    assert_eq!(
+        meta.total_length,
+        meta.files.iter().map(|f| f.length).sum::<u64>()
+    );
 }
 
 #[tokio::test]
@@ -85,7 +88,10 @@ async fn paging_returns_distinct_items() {
 
     let first = advanced::page(&client, &query, 1).await.expect("page 1");
     let second = advanced::page(&client, &query, 2).await.expect("page 2");
-    assert!(first.num_found > 200, "need a big enough result set to page");
+    assert!(
+        first.num_found > 200,
+        "need a big enough result set to page"
+    );
 
     let ids: std::collections::HashSet<_> = first.hits.iter().map(|h| &h.identifier).collect();
     let overlap = second
