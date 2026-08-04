@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+*.torrent
+.DS_Store

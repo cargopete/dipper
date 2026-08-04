@@ -1,0 +1,34 @@
+[package]
+name = "dipper-ia"
+description = "Internet Archive metadata, search and torrent client for dipper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# rustls rather than the platform TLS stack: dipper is meant to be one binary
+# you can drop on a box, not a hunt for OpenSSL.
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "deflate",
+    "gzip",
+    "http2",
+    "json",
+    "rustls",
+    "rustls-native-certs",
+    "stream",
+] }
+serde_bencode = "0.2"
+sha1 = "0.11"
+hex = "0.4"
+url = "2"
+urlencoding = "2"
