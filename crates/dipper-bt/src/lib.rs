@@ -4,11 +4,19 @@
 //! and knows nothing about where it came from.
 
 pub mod bencode;
+pub mod dht;
+pub mod discovery;
 pub mod error;
+pub mod extended;
 pub mod infohash;
 pub mod magnet;
 pub mod metainfo;
+pub mod peer;
+pub mod tracker;
+pub mod wire;
 
+pub use dht::Dht;
+pub use discovery::{Discovery, DiscoveryConfig};
 pub use error::{Error, Result};
 pub use infohash::InfoHash;
 pub use magnet::Magnet;
