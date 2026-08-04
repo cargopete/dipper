@@ -12,6 +12,7 @@ name = "dipper"
 path = "src/main.rs"
 
 [dependencies]
+dipper-bt.workspace = true
 dipper-ia.workspace = true
 dipper-index.workspace = true
 
@@ -25,3 +26,7 @@ clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"
 indicatif = "0.18"
+
+[dev-dependencies]
+tempfile = "3"
+sha1 = "0.11"

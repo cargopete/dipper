@@ -2,7 +2,9 @@
 //! backend. Phase 0 is the metadata and search layer, plus everything needed
 //! to turn a search result into a torrent or a magnet link.
 
+mod download;
 mod fmt;
+mod torrent_source;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,6 +16,8 @@ use dipper_ia::{
 };
 use dipper_index::{Catalogue, Record};
 use indicatif::{ProgressBar, ProgressStyle};
+
+use crate::download::EngineOptions;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -111,11 +115,75 @@ enum Command {
         show: bool,
     },
 
+    /// Resolve a magnet link (or .torrent, or archive.org identifier) to its
+    /// file list, without downloading anything.
+    Resolve {
+        /// A magnet URI, a path to a .torrent, or an archive.org identifier.
+        target: String,
+
+        #[command(flatten)]
+        engine: EngineArgs,
+    },
+
+    /// Download a magnet link, a .torrent, or an archive.org item.
+    Download {
+        /// A magnet URI, a path to a .torrent, or an archive.org identifier.
+        target: String,
+
+        /// Where to put the files. Defaults to the current directory.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+
+        #[command(flatten)]
+        engine: EngineArgs,
+    },
+
     /// Inspect or clear the local catalogue.
     Index {
         #[command(subcommand)]
         action: IndexAction,
     },
+}
+
+#[derive(Debug, Args, Clone)]
+struct EngineArgs {
+    /// Do not use the DHT. Trackers and webseeds only.
+    #[arg(long)]
+    no_dht: bool,
+
+    /// Ignore HTTP webseeds, even when the torrent has them.
+    #[arg(long)]
+    no_webseeds: bool,
+
+    /// The port we tell peers and trackers we listen on.
+    #[arg(long, default_value_t = 6881)]
+    port: u16,
+
+    /// How many peers to talk to at once.
+    #[arg(long, default_value_t = 30)]
+    max_peers: usize,
+
+    /// Seconds to spend looking for peers in the DHT.
+    #[arg(long, default_value_t = 20)]
+    dht_seconds: u64,
+
+    /// Suppress progress bars.
+    #[arg(long)]
+    quiet: bool,
+}
+
+impl From<&EngineArgs> for EngineOptions {
+    fn from(args: &EngineArgs) -> Self {
+        Self {
+            no_dht: args.no_dht,
+            no_webseeds: args.no_webseeds,
+            port: args.port,
+            max_peers: args.max_peers,
+            dht_budget: Duration::from_secs(args.dht_seconds),
+            quiet: args.quiet,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -272,6 +340,20 @@ async fn run(cli: Cli) -> Result<()> {
                 path.display()
             );
             Ok(())
+        }
+
+        Command::Resolve { target, engine } => {
+            let source = torrent_source::resolve(target, &client(&cli)?).await?;
+            download::resolve_command(&source, &engine.into()).await
+        }
+
+        Command::Download {
+            target,
+            output,
+            engine,
+        } => {
+            let source = torrent_source::resolve(target, &client(&cli)?).await?;
+            download::download_command(&source, output.clone(), &engine.into()).await
         }
 
         Command::Index { action } => {

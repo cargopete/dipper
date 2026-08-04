@@ -12,7 +12,11 @@ pub mod infohash;
 pub mod magnet;
 pub mod metainfo;
 pub mod peer;
+pub mod picker;
+pub mod session;
+pub mod storage;
 pub mod tracker;
+pub mod webseed;
 pub mod wire;
 
 pub use dht::Dht;
@@ -21,3 +25,6 @@ pub use error::{Error, Result};
 pub use infohash::InfoHash;
 pub use magnet::Magnet;
 pub use metainfo::{FileSlice, Metainfo, TorrentFile};
+pub use picker::Picker;
+pub use session::{DownloadConfig, DownloadSummary, Progress, download};
+pub use storage::Storage;
