@@ -273,9 +273,108 @@ async fn a_completed_download_resumes_as_a_no_op() {
         assert_eq!(&got, expected, "after the first download, {name} differs");
     }
 
-    let second = session::download(&meta, dir.path(), vec![], &config, |_| {})
-        .await
-        .expect("a finished download re-runs cleanly");
+    let mut resumed = None;
+    let mut rechecks = 0;
+    let second = session::download(&meta, dir.path(), vec![], &config, |update| match update {
+        Progress::Resumed {
+            have,
+            bytes,
+            rehashed,
+            ..
+        } => resumed = Some((have, bytes, rehashed)),
+        Progress::Verifying { .. } => rechecks += 1,
+        _ => {}
+    })
+    .await
+    .expect("a finished download re-runs cleanly");
+
     assert_eq!(second.pieces, meta.piece_count());
     assert_eq!(second.bytes, 0, "nothing should be fetched twice");
+    assert_eq!(
+        resumed,
+        Some((5, 4300, false)),
+        "the resume file should be trusted, with real byte counts"
+    );
+    assert_eq!(
+        rechecks, 0,
+        "a clean resume file means no re-hashing at all"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_file_survives_being_killed_mid_download() {
+    use dipper_bt::resume::ResumeState;
+    use dipper_bt::session::VerifyPolicy;
+
+    let files = fixture_files();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.clone()))
+        .collect();
+    let mut meta = build_torrent(&borrowed);
+    let addr = spawn_webseed(files, None).await;
+    meta.webseeds = vec![format!("http://{addr}/")];
+
+    let dir = tempfile::tempdir().unwrap();
+    session::download(
+        &meta,
+        dir.path(),
+        vec![],
+        &DownloadConfig::default(),
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    let state = ResumeState::load(dir.path(), &meta)
+        .await
+        .expect("a resume file was written");
+    assert!(state.clean, "a finished download leaves a clean state");
+    assert!(state.have.is_complete());
+
+    // Now simulate the kill: mark the state unclean, as it would be if we had
+    // been killed between flushes.
+    let unclean = ResumeState::new(&meta, state.have.clone(), false);
+    unclean.save(dir.path()).await.unwrap();
+
+    let mut rechecks = 0;
+    let mut resumed = None;
+    session::download(
+        &meta,
+        dir.path(),
+        vec![],
+        &DownloadConfig::default(),
+        |update| match update {
+            Progress::Verifying { .. } => rechecks += 1,
+            Progress::Resumed { have, rehashed, .. } => resumed = Some((have, rehashed)),
+            _ => {}
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rechecks > 0,
+        "an unclean state must fall back to re-hashing"
+    );
+    assert_eq!(
+        resumed,
+        Some((5, true)),
+        "re-hashing should find everything that is genuinely there"
+    );
+
+    // And an explicit --verify ignores the (now clean again) file entirely.
+    let mut forced_rechecks = 0;
+    let config = DownloadConfig {
+        verify: VerifyPolicy::Always,
+        ..Default::default()
+    };
+    session::download(&meta, dir.path(), vec![], &config, |update| {
+        if matches!(update, Progress::Verifying { .. }) {
+            forced_rechecks += 1;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(forced_rechecks, meta.piece_count());
 }

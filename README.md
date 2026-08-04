@@ -14,7 +14,26 @@ the CLI it knows only a 20-byte infohash and has no idea where you got it.
 cargo install --path crates/dipper-cli
 ```
 
-## Download things
+## Search and fetch in one go
+
+```sh
+dipper get "dawn chorus birdsong"
+```
+
+```
+1.   68.7 MiB  audio      Megaheadphoneboy - A Plane Flew Overhead…  (MegaHeadPhoneBoy)
+2.  101.4 MiB  audio      Dawn Chorus  (Robert White)
+3.  141.0 MiB  audio      2024.06.09 framework radio  (framework)
+4.   13.5 MiB  audio      Birdsong in a Kent garden  (Ruth G)
+
+which one? [1-4, enter for 1, q to quit]
+```
+
+`--list` shows the results and stops, `--pick <n>` and `--first` choose without
+asking, and `-o <dir>` says where to put it. Only torrent-backed items are
+offered, since there is nothing to fetch otherwise.
+
+## Download things directly
 
 ```sh
 # an arbitrary magnet link
@@ -30,11 +49,13 @@ dipper download nasa -o ~/Downloads
 dipper resolve "magnet:?xt=urn:btih:481b6e...071e"
 ```
 
-Interrupt a download and run it again: it re-hashes what is on disk and picks
-up where it stopped.
+Interrupt a download and run it again: it picks up where it stopped. A resume
+file next to the download records which pieces verified, so a restart does not
+mean re-reading the lot. It is only trusted when it was written cleanly; after
+a kill -9 dipper falls back to re-hashing, and `--verify` forces that anyway.
 
 Engine flags: `--no-dht`, `--no-webseeds`, `--port`, `--max-peers`,
-`--dht-seconds`, `--quiet`.
+`--dht-seconds`, `--verify`, `--quiet`.
 
 ## Search archive.org
 

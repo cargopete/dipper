@@ -19,6 +19,7 @@ use crate::infohash::generate_peer_id;
 use crate::metainfo::Metainfo;
 use crate::peer::PeerConnection;
 use crate::picker::Picker;
+use crate::resume::ResumeState;
 use crate::storage::Storage;
 use crate::webseed::Webseed;
 use crate::wire::{BLOCK_SIZE, Bitfield, Message};
@@ -37,8 +38,22 @@ pub struct DownloadConfig {
     pub webseed_timeout: Duration,
     /// The port we claim to listen on.
     pub port: u16,
-    /// Re-hash existing files before starting, instead of trusting them.
-    pub verify_existing: bool,
+    /// How to work out what is already on disk.
+    pub verify: VerifyPolicy,
+}
+
+/// What to do about data that is already in the download directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerifyPolicy {
+    /// Trust a cleanly-written resume file; re-hash otherwise. This is what
+    /// you want: re-hashing a 40 GB item on every start is a coffee break
+    /// before anything happens.
+    #[default]
+    Auto,
+    /// Always re-hash. Slow, and the right answer if you suspect the files.
+    Always,
+    /// Assume nothing is there. Fast, and will happily redownload everything.
+    Never,
 }
 
 impl Default for DownloadConfig {
@@ -50,7 +65,7 @@ impl Default for DownloadConfig {
             peer_timeout: Duration::from_secs(20),
             webseed_timeout: Duration::from_secs(60),
             port: 6881,
-            verify_existing: true,
+            verify: VerifyPolicy::Auto,
         }
     }
 }
@@ -63,10 +78,17 @@ pub enum Progress {
         checked: usize,
         total: usize,
     },
-    /// We already had this many pieces before starting.
+    /// We already had this much before starting. `rehashed` is false when the
+    /// count came from a resume file rather than from re-reading every byte.
+    ///
+    /// `bytes` is the real total of the pieces we hold, not `have` multiplied
+    /// by the piece length: held pieces are scattered, and the last one is
+    /// usually short.
     Resumed {
         have: usize,
         total: usize,
+        bytes: u64,
+        rehashed: bool,
     },
     PeerConnected {
         addr: String,
@@ -124,12 +146,79 @@ struct Stats {
     failed_hashes: AtomicU64,
 }
 
+/// Keeps the resume sidecar roughly up to date without writing it on every
+/// piece. Lives behind its own `Arc` so the coordinator can mark the file
+/// clean after all the workers have gone.
+struct ResumeWriter {
+    root: PathBuf,
+    info_hash: crate::infohash::InfoHash,
+    piece_length: u64,
+    total_length: u64,
+    have: Mutex<Bitfield>,
+    since_flush: AtomicU64,
+}
+
+/// Consecutive failures before we conclude a webseed is not coming back.
+const WEBSEED_MAX_FAILURES: u32 = 5;
+
+/// Backoff between webseed retries: 0.5s, 1s, 2s, 4s, capped at 5s.
+fn webseed_backoff(failures: u32) -> Duration {
+    Duration::from_millis(500 * 2u64.saturating_pow(failures.saturating_sub(1).min(6)))
+        .min(Duration::from_secs(5))
+}
+
+/// Write the sidecar every this many pieces. Often enough that a kill -9 costs
+/// seconds of re-hashing, rare enough that we are not writing a file per piece.
+const RESUME_FLUSH_EVERY: u64 = 32;
+
+impl ResumeWriter {
+    fn new(root: PathBuf, meta: &Metainfo, have: Bitfield) -> Self {
+        Self {
+            root,
+            info_hash: meta.info_hash,
+            piece_length: meta.piece_length,
+            total_length: meta.total_length,
+            have: Mutex::new(have),
+            since_flush: AtomicU64::new(0),
+        }
+    }
+
+    async fn state(&self, clean: bool) -> ResumeState {
+        ResumeState {
+            info_hash: self.info_hash,
+            piece_length: self.piece_length,
+            total_length: self.total_length,
+            have: self.have.lock().await.clone(),
+            clean,
+        }
+    }
+
+    /// Record a verified piece, flushing occasionally.
+    async fn completed(&self, index: usize) {
+        self.have.lock().await.set(index);
+        if self.since_flush.fetch_add(1, Ordering::Relaxed) + 1 >= RESUME_FLUSH_EVERY {
+            self.since_flush.store(0, Ordering::Relaxed);
+            self.flush(false).await;
+        }
+    }
+
+    /// Write the sidecar. Failures are logged, never fatal: the worst case is
+    /// that the next run re-hashes, which is exactly where we started.
+    async fn flush(&self, clean: bool) {
+        let state = self.state(clean).await;
+        if let Err(err) = state.save(&self.root).await {
+            tracing::debug!(%err, "could not write the resume file");
+        }
+    }
+}
+
 struct Shared {
     meta: Metainfo,
     storage: Storage,
     picker: Mutex<Picker>,
     progress: mpsc::UnboundedSender<Progress>,
     stats: Arc<Stats>,
+    resume: Arc<ResumeWriter>,
 }
 
 impl Shared {
@@ -160,6 +249,7 @@ impl Shared {
         // fetch_max, not store: two workers finishing out of order would
         // otherwise let the slower one write back a stale, lower count.
         self.stats.have.fetch_max(have as u64, Ordering::Relaxed);
+        self.resume.completed(index).await;
         let bytes = self
             .stats
             .downloaded
@@ -201,21 +291,38 @@ where
     let storage = Storage::create(root.as_ref(), meta).await?;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    // Work out what we already have. A fresh download costs one pass over
-    // empty files, which is cheap; a resume saves everything.
-    let existing = if config.verify_existing {
-        let progress = tx.clone();
-        storage
-            .verify_all(|checked, total| {
-                let _ = progress.send(Progress::Verifying { checked, total });
-            })
-            .await?
-    } else {
-        Bitfield::empty(meta.piece_count())
+    // Work out what we already have. A cleanly-saved resume file makes this
+    // instant; anything else means re-reading and re-hashing the lot.
+    let resume = match config.verify {
+        VerifyPolicy::Auto => ResumeState::load(storage.root(), meta)
+            .await
+            .filter(|state| state.clean),
+        VerifyPolicy::Always | VerifyPolicy::Never => None,
     };
+    let (existing, rehashed) = match resume {
+        Some(state) => (state.have, false),
+        None if config.verify == VerifyPolicy::Never => {
+            (Bitfield::empty(meta.piece_count()), false)
+        }
+        None => {
+            let progress = tx.clone();
+            let have = storage
+                .verify_all(|checked, total| {
+                    let _ = progress.send(Progress::Verifying { checked, total });
+                })
+                .await?;
+            (have, true)
+        }
+    };
+    let existing_bytes: u64 = (0..meta.piece_count())
+        .filter(|index| existing.has(*index))
+        .filter_map(|index| meta.piece_size(index))
+        .sum();
     let _ = tx.send(Progress::Resumed {
         have: existing.count_set(),
         total: meta.piece_count(),
+        bytes: existing_bytes,
+        rehashed,
     });
 
     let root = storage.root().to_path_buf();
@@ -224,12 +331,18 @@ where
         .have
         .store(existing.count_set() as u64, Ordering::Relaxed);
 
+    let resume = Arc::new(ResumeWriter::new(root.clone(), meta, existing.clone()));
+    // Mark the download in progress straight away: if we are killed before
+    // the next flush, the unclean flag sends the next run back to re-hashing.
+    resume.flush(false).await;
+
     let shared = Arc::new(Shared {
         meta: meta.clone(),
         storage,
         picker: Mutex::new(Picker::with_have(existing)),
         progress: tx.clone(),
         stats: Arc::clone(&stats),
+        resume: Arc::clone(&resume),
     });
 
     let mut tasks = Vec::new();
@@ -276,6 +389,9 @@ where
     for task in tasks {
         let _ = task.await;
     }
+    // Everyone has stopped, so what we have now is final: write it down and
+    // mark it clean, which is what lets the next run skip re-hashing.
+    resume.flush(true).await;
 
     let bytes = stats.downloaded.load(Ordering::Relaxed);
     let summary = DownloadSummary {
@@ -494,22 +610,26 @@ async fn run_webseed(url: &str, shared: &Shared, timeout: Duration) -> Result<()
                     failures = 0;
                 } else {
                     failures += 1;
-                    if failures >= 3 {
+                    if failures >= WEBSEED_MAX_FAILURES {
                         return Err(Error::PieceMismatch {
                             index: index as u32,
                         });
                     }
+                    tokio::time::sleep(webseed_backoff(failures)).await;
                 }
             }
             Err(err) => {
                 shared.picker.lock().await.release(index);
                 failures += 1;
                 tracing::debug!(webseed = url, piece = index, %err, "webseed piece failed");
-                // Three strikes and we assume this webseed is not going to
-                // work, rather than hammering it for every piece.
-                if failures >= 3 {
+                // Give up eventually, but not immediately: archive.org's data
+                // nodes throw the occasional 500 and recover seconds later,
+                // and burning through every worker on a transient error means
+                // stopping at 27 pieces out of 28.
+                if failures >= WEBSEED_MAX_FAILURES {
                     return Err(err);
                 }
+                tokio::time::sleep(webseed_backoff(failures)).await;
             }
         }
     }
@@ -562,7 +682,7 @@ mod tests {
 
         let mut resumed = None;
         let summary = download(&meta, dir.path(), vec![], &DownloadConfig::default(), |p| {
-            if let Progress::Resumed { have, total } = p {
+            if let Progress::Resumed { have, total, .. } = p {
                 resumed = Some((have, total));
             }
         })
@@ -605,7 +725,7 @@ mod tests {
 
         let mut resumed = None;
         let _ = download(&meta, dir.path(), vec![], &DownloadConfig::default(), |p| {
-            if let Progress::Resumed { have, total } = p {
+            if let Progress::Resumed { have, total, .. } = p {
                 resumed = Some((have, total));
             }
         })

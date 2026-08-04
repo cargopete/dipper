@@ -4,6 +4,7 @@
 
 mod download;
 mod fmt;
+mod get;
 mod torrent_source;
 
 use std::path::PathBuf;
@@ -115,6 +116,40 @@ enum Command {
         show: bool,
     },
 
+    /// Search archive.org and download what you pick, in one go.
+    Get {
+        /// What you are after.
+        #[arg(required = true)]
+        query: Vec<String>,
+
+        /// How many results to offer.
+        #[arg(short = 'n', long, default_value_t = 15)]
+        limit: usize,
+
+        /// Show the results and stop, without downloading anything.
+        #[arg(short = 'l', long)]
+        list: bool,
+
+        /// Take the top result without asking.
+        #[arg(long, conflicts_with = "list")]
+        first: bool,
+
+        /// Take result number N from the list.
+        #[arg(long, value_name = "N", conflicts_with = "first")]
+        pick: Option<usize>,
+
+        /// Where to put the files. Defaults to the current directory.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+
+        /// Ignore the local catalogue and always ask archive.org.
+        #[arg(long)]
+        remote: bool,
+
+        #[command(flatten)]
+        engine: EngineArgs,
+    },
+
     /// Resolve a magnet link (or .torrent, or archive.org identifier) to its
     /// file list, without downloading anything.
     Resolve {
@@ -167,6 +202,10 @@ struct EngineArgs {
     #[arg(long, default_value_t = 20)]
     dht_seconds: u64,
 
+    /// Re-hash everything already on disk instead of trusting the resume file.
+    #[arg(long)]
+    verify: bool,
+
     /// Suppress progress bars.
     #[arg(long)]
     quiet: bool,
@@ -180,6 +219,7 @@ impl From<&EngineArgs> for EngineOptions {
             port: args.port,
             max_peers: args.max_peers,
             dht_budget: Duration::from_secs(args.dht_seconds),
+            verify: args.verify,
             quiet: args.quiet,
             ..Default::default()
         }
@@ -340,6 +380,43 @@ async fn run(cli: Cli) -> Result<()> {
                 path.display()
             );
             Ok(())
+        }
+
+        Command::Get {
+            query,
+            limit,
+            list,
+            first,
+            pick,
+            output,
+            remote,
+            engine,
+        } => {
+            let choice = match (list, first, pick) {
+                (true, _, _) => get::Choice::ListOnly,
+                (_, true, _) => get::Choice::First,
+                (_, _, Some(position)) => get::Choice::Position(*position),
+                _ => get::Choice::Prompt,
+            };
+            // The local catalogue is a cache, not a requirement: if it is
+            // empty or absent we just ask archive.org.
+            let catalogue = if *remote {
+                None
+            } else {
+                catalogue(&cli)
+                    .ok()
+                    .filter(|c| !c.is_empty().unwrap_or(true))
+            };
+            get::get_command(
+                &client(&cli)?,
+                catalogue.as_ref(),
+                &query.join(" "),
+                *limit,
+                choice,
+                output.clone(),
+                &engine.into(),
+            )
+            .await
         }
 
         Command::Resolve { target, engine } => {

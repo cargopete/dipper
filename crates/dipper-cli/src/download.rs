@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use dipper_bt::discovery::{Discovery, DiscoveryConfig, Source as PeerSource};
 use dipper_bt::infohash::generate_peer_id;
-use dipper_bt::session::{DownloadConfig, PieceSource, Progress};
+use dipper_bt::session::{DownloadConfig, PieceSource, Progress, VerifyPolicy};
 use dipper_bt::{Dht, Magnet, Metainfo, peer, session};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -22,6 +22,8 @@ pub struct EngineOptions {
     pub max_peers: usize,
     pub dht_budget: Duration,
     pub tracker_timeout: Duration,
+    /// Force a full re-hash of existing data.
+    pub verify: bool,
     pub quiet: bool,
 }
 
@@ -34,6 +36,7 @@ impl Default for EngineOptions {
             max_peers: 30,
             dht_budget: Duration::from_secs(20),
             tracker_timeout: Duration::from_secs(10),
+            verify: false,
             quiet: false,
         }
     }
@@ -215,6 +218,11 @@ pub async fn download_command(
     let config = DownloadConfig {
         max_peers: options.max_peers,
         port: options.port,
+        verify: if options.verify {
+            VerifyPolicy::Always
+        } else {
+            VerifyPolicy::Auto
+        },
         ..Default::default()
     };
     let started = Instant::now();
@@ -224,12 +232,19 @@ pub async fn download_command(
         Progress::Verifying { checked, total } => {
             bar.set_message(format!("checking existing data {checked}/{total}"));
         }
-        Progress::Resumed { have, total } => {
-            let bytes: u64 = (0..have).filter_map(|i| meta.piece_size(i)).sum();
+        Progress::Resumed {
+            have,
+            total,
+            bytes,
+            rehashed,
+        } => {
             already_have.set(bytes);
             if have > 0 {
                 bar.set_position(bytes);
-                bar.set_message(format!("resuming with {have}/{total} pieces"));
+                bar.set_message(format!(
+                    "resuming with {have}/{total} pieces{}",
+                    if rehashed { " (rechecked)" } else { "" }
+                ));
             }
         }
         Progress::PeerConnected { addr, client } => {
