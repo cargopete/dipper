@@ -142,6 +142,11 @@ impl Shared {
             return Ok(false);
         }
 
+        // Write before marking. The other order lets a worker announce a piece
+        // it has not finished writing, and a download that ends in that window
+        // reports success over a file with a hole in it.
+        self.storage.write_piece(index, data).await?;
+
         // In the endgame several workers race for the same piece, so the
         // second one home must not be counted twice.
         let (have, total) = {
@@ -152,8 +157,9 @@ impl Shared {
             picker.complete(index);
             (picker.completed(), picker.piece_count())
         };
-        self.storage.write_piece(index, data).await?;
-        self.stats.have.store(have as u64, Ordering::Relaxed);
+        // fetch_max, not store: two workers finishing out of order would
+        // otherwise let the slower one write back a stale, lower count.
+        self.stats.have.fetch_max(have as u64, Ordering::Relaxed);
         let bytes = self
             .stats
             .downloaded
@@ -319,6 +325,7 @@ async fn run_peer(
     peer.send(Message::Interested).await?;
 
     let mut idle_rounds = 0u32;
+    let mut bad_pieces = 0u32;
     loop {
         if shared.is_complete().await {
             return Ok(());
@@ -353,9 +360,20 @@ async fn run_peer(
 
         match fetch_piece_from_peer(&mut peer, shared, index, config).await {
             Ok(Some(data)) => {
-                shared
+                if !shared
                     .accept(index, &data, PieceSource::Peer(addr.to_string()))
-                    .await?;
+                    .await?
+                {
+                    // Attribution is unambiguous here: this peer supplied
+                    // every block of the piece. Three bad pieces and we stop
+                    // giving it the benefit of the doubt.
+                    bad_pieces += 1;
+                    if bad_pieces >= 3 {
+                        return Err(Error::PieceMismatch {
+                            index: index as u32,
+                        });
+                    }
+                }
             }
             Ok(None) => {
                 // Choked or otherwise interrupted; let someone else have it.
@@ -466,10 +484,22 @@ async fn run_webseed(url: &str, shared: &Shared, timeout: Duration) -> Result<()
 
         match seed.fetch_piece(&shared.meta, index).await {
             Ok(data) => {
-                failures = 0;
-                shared
+                // A piece that arrives intact but fails its hash counts as a
+                // failure too, or a webseed serving corrupt bytes would keep
+                // us fetching the same piece for ever.
+                let verified = shared
                     .accept(index, &data, PieceSource::Webseed(url.to_string()))
                     .await?;
+                if verified {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                    if failures >= 3 {
+                        return Err(Error::PieceMismatch {
+                            index: index as u32,
+                        });
+                    }
+                }
             }
             Err(err) => {
                 shared.picker.lock().await.release(index);
