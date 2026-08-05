@@ -249,7 +249,7 @@ async fn an_unplayable_container_is_offered_as_a_transcode() {
     // Both streams are unplayable, so neither can be passed through.
     assert_eq!(info["remux_only"], false);
     assert_eq!(
-        info["mime"], "video/mp4; codecs=\"avc1.640028,mp4a.40.2\"",
+        info["mime"], "video/mp4; codecs=\"avc1.640033,mp4a.40.2\"",
         "the codec string must match what the transcode actually produces"
     );
     assert!(info["duration"].as_f64().unwrap() > 19.0);

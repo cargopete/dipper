@@ -25,6 +25,13 @@ pub const SEGMENT_SECONDS: f64 = 6.0;
 const SEGMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// What the page is told a transcode will produce: H.264 High, at a level
+/// ceiling rather than an exact level. See the note in [`plan`].
+pub const TRANSCODE_CODEC: &str = "avc1.640033";
+
+/// Always available, and tolerant of inputs hardware encoders refuse.
+const FALLBACK_ENCODER: &str = "libx264";
+
 /// ffmpeg, if this machine has it.
 #[derive(Debug, Clone)]
 pub struct Tools {
@@ -248,8 +255,16 @@ pub fn plan(probe: &Probe) -> Plan {
         codecs.push(if copy_video {
             avc_codec_string(video.profile.as_deref(), video.level)
         } else {
-            // What the transcode below is pinned to.
-            "avc1.640028".to_string()
+            // The transcode pins the profile to High but deliberately lets the
+            // encoder choose its own level. Pinning the level asks hardware
+            // encoders to accept a combination they may refuse outright, and
+            // VideoToolbox refuses with a bare `-12902` at encoder setup.
+            //
+            // So the declared level is an upper bound rather than a promise.
+            // Browsers read this to decide whether they could decode the
+            // stream, and claiming a ceiling higher than we produce is safe;
+            // claiming one lower is what breaks playback.
+            TRANSCODE_CODEC.to_string()
         });
     }
     if probe.audio.is_some() {
@@ -302,6 +317,31 @@ impl Tools {
     /// shifted timeline and silently discards every packet. Segments therefore
     /// start at zero and the browser places them with `timestampOffset`.
     pub async fn segment(&self, url: &str, index: u32, plan: &Plan) -> Result<Vec<u8>> {
+        match self.run_segment(url, index, plan, self.video_encoder).await {
+            Ok(data) => Ok(data),
+            Err(err) if self.video_encoder != FALLBACK_ENCODER && !plan.copy_video => {
+                // Hardware encoders refuse inputs software ones accept, and
+                // report it as an opaque setup failure. Falling back costs CPU
+                // and keeps playback alive, which is the better trade every
+                // time: the alternative is a video that simply stops.
+                tracing::warn!(
+                    encoder = self.video_encoder,
+                    %err,
+                    "hardware encoder refused this input; retrying in software"
+                );
+                self.run_segment(url, index, plan, FALLBACK_ENCODER).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn run_segment(
+        &self,
+        url: &str,
+        index: u32,
+        plan: &Plan,
+        encoder: &str,
+    ) -> Result<Vec<u8>> {
         let start = f64::from(index) * SEGMENT_SECONDS;
         let mut args: Vec<String> = vec![
             "-hide_banner".into(),
@@ -330,19 +370,18 @@ impl Tools {
             } else {
                 args.extend([
                     "-c:v".into(),
-                    self.video_encoder.into(),
-                    // Pinned so the MSE codec string is known rather than
-                    // discovered after the fact.
+                    encoder.into(),
+                    // Profile is pinned because it fixes the first byte of the
+                    // codec string. The level deliberately is not: see
+                    // TRANSCODE_CODEC.
                     "-profile:v".into(),
                     "high".into(),
-                    "-level".into(),
-                    "4.0".into(),
                     "-pix_fmt".into(),
                     "yuv420p".into(),
                     "-b:v".into(),
                     "3M".into(),
                 ]);
-                if self.video_encoder == "libx264" {
+                if encoder == FALLBACK_ENCODER {
                     args.extend(["-preset".into(), "veryfast".into()]);
                 }
             }
@@ -467,6 +506,8 @@ mod tests {
         // container is wrong, so this should cost almost nothing.
         let plan = plan(&probe_with(Some("h264"), Some("aac")));
         assert!(plan.copy_video && plan.copy_audio);
+        // Copied video reports its real profile and level, measured from the
+        // stream, rather than the ceiling the transcode path declares.
         assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640028,mp4a.40.2\"");
     }
 
@@ -477,7 +518,7 @@ mod tests {
         let plan = plan(&probe_with(Some("mpeg2video"), Some("ac3")));
         assert!(!plan.copy_video, "mpeg2 cannot be passed through");
         assert!(!plan.copy_audio, "no browser decodes ac3 reliably");
-        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640028,mp4a.40.2\"");
+        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640033,mp4a.40.2\"");
     }
 
     #[test]
@@ -499,7 +540,7 @@ mod tests {
     fn a_silent_video_produces_no_audio_codec() {
         let plan = plan(&probe_with(Some("mpeg4"), None));
         assert!(!plan.has_audio);
-        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640028\"");
+        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640033\"");
     }
 
     #[test]
