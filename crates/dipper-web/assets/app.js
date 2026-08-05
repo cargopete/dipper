@@ -263,9 +263,21 @@ async function pump() {
 
   session.busy = true;
   const index = session.next;
+  let waiting = false;
   try {
     const response = await fetch(`${info.segment_prefix}${index}`);
+
+    // 503 means the bytes have not arrived yet, not that anything is wrong.
+    // Giving up here is what turns a slow torrent into a dead player, so we
+    // say so and come back for the same segment shortly.
+    if (response.status === 503) {
+      waiting = true;
+      const body = await response.json().catch(() => null);
+      setStatus((body && body.error) || "waiting for this part to download");
+      return;
+    }
     if (!response.ok) throw new Error(await errorText(response));
+
     const bytes = await response.arrayBuffer();
     if (session.stopped || session !== mse) return;
 
@@ -273,6 +285,7 @@ async function pump() {
     buffer.timestampOffset = index * info.segment_seconds;
     await appendWithEviction(buffer, bytes);
     session.next = index + 1;
+    setStatus("");
   } catch (err) {
     if (!session.stopped) {
       showViewerNote(`Playback stopped at segment ${index}: ${err.message}`);
@@ -281,8 +294,17 @@ async function pump() {
   } finally {
     session.busy = false;
   }
-  // Keep going until the buffer is comfortable.
-  if (mse === session && !session.stopped) setTimeout(pump, 0);
+
+  if (mse !== session || session.stopped) return;
+  // Back off when waiting on the swarm; otherwise keep the buffer topped up.
+  setTimeout(pump, waiting ? 2000 : 0);
+}
+
+/** A line under the piece map, for when playback is waiting on the download. */
+function setStatus(message) {
+  if (!el.mapStatus) return;
+  el.mapStatus.dataset.waiting = message ? "yes" : "";
+  if (message) el.mapStatus.textContent = message;
 }
 
 /** Append, making room by dropping what is well behind the playhead. */
@@ -541,6 +563,10 @@ function renderStats(stats) {
       ? el.video.currentTime / el.video.duration
       : null;
   drawMap(stats.runs, stats.pieces_total, headFraction);
+
+  // The player owns this line while it is waiting on the swarm, since "42% on
+  // disk" is a good deal less useful than saying why nothing is happening.
+  if (el.mapStatus.dataset.waiting === "yes") return;
 
   const percent = stats.pieces_total
     ? Math.floor((stats.pieces_have / stats.pieces_total) * 100)

@@ -30,6 +30,15 @@ impl ApiError {
     pub fn server(message: impl Into<String>) -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR, message.into())
     }
+
+    /// The request was reasonable but the data has not arrived yet.
+    ///
+    /// Distinct from a failure on purpose: the caller should wait and ask
+    /// again rather than give up, and a player that treats "not yet" as
+    /// "never" stops dead a few seconds into a slow torrent.
+    pub fn not_ready(message: impl Into<String>) -> Self {
+        Self(StatusCode::SERVICE_UNAVAILABLE, message.into())
+    }
 }
 
 impl IntoResponse for ApiError {

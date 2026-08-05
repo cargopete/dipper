@@ -264,15 +264,89 @@ async fn generate(
     }
 
     let url = state.stream_url(hash, file);
-    let data = tools
-        .segment(&url, index, &plan)
-        .await
-        .map_err(|err| ApiError::server(err.to_string()))?;
+    let entry = torrent
+        .meta
+        .files
+        .get(file)
+        .ok_or_else(|| ApiError::not_found("no such file in this torrent"))?;
 
-    let data = Arc::new(data);
-    state.cache_segment(&info_hash, file, index, Arc::clone(&data));
-    Ok(data)
+    // Work out whether a disappointing result was a real failure or simply
+    // data that has not arrived. Judged after the attempt rather than before,
+    // so a conservative estimate can never refuse a segment ffmpeg would have
+    // managed perfectly well.
+    let blame = |fallback: String| {
+        let held = held_fraction(&torrent, entry, probe.duration, index);
+        if held < 1.0 {
+            ApiError::not_ready(format!(
+                "that part of the file has not downloaded yet ({}% of it is here)",
+                (held * 100.0).round() as u32
+            ))
+        } else {
+            ApiError::server(fallback)
+        }
+    };
+
+    match tools.segment(&url, index, &plan).await {
+        // ffmpeg can exit happily having produced only a header, which would
+        // reach the browser as a valid-looking segment containing no frames.
+        Ok(data) if fmp4::first_moof(&data).is_none() => Err(blame(format!(
+            "ffmpeg produced no fragment for segment {index}"
+        ))),
+        Ok(data) => {
+            let data = Arc::new(data);
+            state.cache_segment(&info_hash, file, index, Arc::clone(&data));
+            Ok(data)
+        }
+        Err(err) => Err(blame(err.to_string())),
+    }
 }
+
+/// How much of the source a segment needs is actually on disk, from 0 to 1.
+///
+/// The byte span is estimated by assuming a roughly even bitrate, which is
+/// wrong for variable bitrate video but easily good enough to tell "this has
+/// not arrived" from "this is broken". A margin either side covers the skew.
+/// Only ever used to explain a failure, never to prevent an attempt.
+fn held_fraction(
+    torrent: &Torrent,
+    entry: &dipper_bt::TorrentFile,
+    duration: f64,
+    index: u32,
+) -> f64 {
+    let Some((from, span)) = estimated_span(entry.offset, entry.length, duration, index) else {
+        return 1.0;
+    };
+    let pieces = torrent.meta.pieces_for_span(from, span);
+    if pieces.is_empty() {
+        return 1.0;
+    }
+    let have = torrent.handle.have();
+    let total = pieces.len();
+    let held = pieces.filter(|piece| have.has(*piece)).count();
+    held as f64 / total as f64
+}
+
+/// Roughly which bytes of the torrent a segment needs, as (offset, length).
+///
+/// Assumes an even bitrate, which is wrong for variable bitrate video, so a
+/// generous margin is added either side: a keyframe can sit well before the
+/// moment we want, and a container index may live at the far end of the file.
+/// `None` when there is nothing sensible to estimate from.
+fn estimated_span(offset: u64, length: u64, duration: f64, index: u32) -> Option<(u64, u64)> {
+    if duration <= 0.0 || length == 0 || !duration.is_finite() {
+        return None;
+    }
+    let per_second = length as f64 / duration;
+    let start = f64::from(index) * ffmpeg::SEGMENT_SECONDS * per_second;
+    let len = ffmpeg::SEGMENT_SECONDS * per_second;
+    let margin = (length as f64 * 0.02).max(4.0 * 1024.0 * 1024.0);
+
+    let from = offset + (start - margin).max(0.0) as u64;
+    let span = (len + margin * 2.0) as u64;
+    Some((from, span))
+}
+
+
 
 fn mp4_response(body: Vec<u8>) -> Response {
     (
@@ -356,4 +430,60 @@ pub async fn embedded(
 
 fn vtt_response(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINUTE: f64 = 60.0;
+
+    #[test]
+    fn the_first_segment_starts_at_the_beginning_of_the_file() {
+        // The margin must not push the offset before the file starts, which
+        // would sample another file's pieces entirely.
+        let (from, _) = estimated_span(1_000, 600_000_000, MINUTE, 0).unwrap();
+        assert_eq!(from, 1_000);
+    }
+
+    #[test]
+    fn later_segments_move_proportionally_through_the_file() {
+        let length = 600_000_000u64;
+        // Ten minutes, so each six second segment is a hundredth of the file.
+        let (early, _) = estimated_span(0, length, 600.0, 1).unwrap();
+        let (late, _) = estimated_span(0, length, 600.0, 50).unwrap();
+        assert!(late > early, "segment 50 should sit further in than segment 1");
+        // Segment 50 is halfway through ten minutes.
+        let halfway = length / 2;
+        let margin = (length as f64 * 0.02) as u64;
+        assert!(
+            late.abs_diff(halfway) <= margin + 1,
+            "expected near {halfway}, got {late}"
+        );
+    }
+
+    #[test]
+    fn the_span_is_offset_by_where_the_file_sits_in_the_torrent() {
+        // A file partway through a multi file torrent must not be checked
+        // against the pieces of whatever precedes it.
+        let (from, _) = estimated_span(500_000_000, 100_000_000, MINUTE, 2).unwrap();
+        assert!(from >= 500_000_000, "the file offset was dropped");
+    }
+
+    #[test]
+    fn nonsense_inputs_yield_no_estimate_rather_than_a_panic() {
+        assert!(estimated_span(0, 1_000, 0.0, 0).is_none());
+        assert!(estimated_span(0, 1_000, -5.0, 0).is_none());
+        assert!(estimated_span(0, 0, MINUTE, 0).is_none());
+        assert!(estimated_span(0, 1_000, f64::NAN, 0).is_none());
+        assert!(estimated_span(0, 1_000, f64::INFINITY, 0).is_none());
+    }
+
+    #[test]
+    fn a_small_file_still_gets_a_usable_margin() {
+        // Two percent of a tiny file is nothing, so the floor has to apply or
+        // the check would demand an implausibly precise span.
+        let (_, span) = estimated_span(0, 1_000, MINUTE, 0).unwrap();
+        assert!(span >= 8 * 1024 * 1024, "margin floor not applied: {span}");
+    }
 }
