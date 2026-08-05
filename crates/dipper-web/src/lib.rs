@@ -5,12 +5,16 @@
 //! serves the result over HTTP on localhost. The interesting part is that it
 //! serves bytes that have not arrived yet: see [`stream`].
 
+pub mod ffmpeg;
+pub mod fmp4;
 pub mod media;
+pub mod play;
 pub mod range;
 pub mod routes;
 pub mod search;
 pub mod state;
 pub mod stream;
+pub mod subtitles;
 pub mod torrent;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -65,6 +69,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(routes::index))
         .route("/app.css", get(routes::stylesheet))
         .route("/app.js", get(routes::script))
+        .route("/api/play/{hash}/{file}", get(play::info))
+        .route("/api/play/{hash}/{file}/init.mp4", get(play::init))
+        .route("/api/play/{hash}/{file}/seg/{index}", get(play::segment))
+        .route("/api/play/{hash}/{file}/subs/{track}", get(play::embedded))
+        .route("/api/subtitles/{hash}/{file}", get(play::sidecar))
         .route("/api/search", get(search::handler))
         .route("/api/shelves", get(search::shelves))
         .route("/api/resolve", post(routes::resolve))
@@ -93,14 +102,36 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
         );
     }
 
-    let state = Arc::new(AppState::new(config));
+    let mut state = AppState::new(config);
+    state.tools = ffmpeg::Tools::detect().await;
+    let has_ffmpeg = state.tools.is_some();
+    let state = Arc::new(state);
     tokio::spawn(routes::sweep(Arc::clone(&state)));
 
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("could not bind {address}"))?;
 
-    println!("dipper is serving at http://{address}");
+    // ffmpeg reads files back through our own range endpoint, so it needs a
+    // reachable address. Taken from the listener rather than the config, since
+    // port 0 means the kernel chose it.
+    let bound = listener.local_addr().unwrap_or(address);
+    let reachable = if bound.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound.port())
+    } else {
+        bound
+    };
+    *state.self_base.lock().expect("self_base lock") = format!("http://{reachable}");
+
+    println!("dipper is serving at http://{bound}");
+    if has_ffmpeg {
+        println!("ffmpeg found: files browsers cannot open will be converted as they play.");
+    } else {
+        println!(
+            "ffmpeg not found: MKV, AVI and similar will be offered as downloads rather than \
+             played. Install ffmpeg to have them converted."
+        );
+    }
     println!("paste a magnet link to start watching. Ctrl-C to stop.");
 
     axum::serve(listener, router(state))

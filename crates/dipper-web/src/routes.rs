@@ -22,6 +22,14 @@ impl ApiError {
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self(StatusCode::BAD_REQUEST, message.into())
     }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self(StatusCode::NOT_FOUND, message.into())
+    }
+
+    pub fn server(message: impl Into<String>) -> Self {
+        Self(StatusCode::INTERNAL_SERVER_ERROR, message.into())
+    }
 }
 
 impl IntoResponse for ApiError {

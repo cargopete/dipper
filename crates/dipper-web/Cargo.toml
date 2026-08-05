@@ -14,7 +14,7 @@ dipper-ia.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["net", "fs", "signal"] }
+tokio = { workspace = true, features = ["net", "fs", "signal", "process"] }
 tracing.workspace = true
 
 axum = { version = "0.8", default-features = false, features = [

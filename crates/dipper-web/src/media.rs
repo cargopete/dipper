@@ -113,24 +113,32 @@ fn other(content_type: &'static str) -> Media {
     }
 }
 
-/// Pick the file a viewer most likely meant: the largest playable video, or
-/// failing that the largest playable anything.
+/// Pick the file a viewer most likely meant: the largest video, or failing
+/// that the largest audio.
 ///
 /// Size is a better signal than name. Torrents are full of samples, trailers
 /// and "RARBG.txt", and the feature is reliably the biggest thing in there.
+///
+/// Containers needing conversion are ranked below native ones but still
+/// offered, because dipper can convert them when ffmpeg is present. An item
+/// whose only video is an MPEG program stream, which describes a good deal of
+/// the Internet Archive, should still open on something.
 pub fn best_to_play(files: &[dipper_bt::TorrentFile]) -> Option<usize> {
-    let pick = |kind: Kind| {
+    let pick = |kind: Kind, playback: Playback| {
         files
             .iter()
             .enumerate()
             .filter(|(_, file)| {
                 let media = classify(&file.path);
-                media.playback == Playback::Native && media.kind == kind
+                media.playback == playback && media.kind == kind
             })
             .max_by_key(|(_, file)| file.length)
             .map(|(index, _)| index)
     };
-    pick(Kind::Video).or_else(|| pick(Kind::Audio))
+    pick(Kind::Video, Playback::Native)
+        .or_else(|| pick(Kind::Video, Playback::NeedsRemux))
+        .or_else(|| pick(Kind::Audio, Playback::Native))
+        .or_else(|| pick(Kind::Audio, Playback::NeedsRemux))
 }
 
 #[cfg(test)]
@@ -183,11 +191,31 @@ mod tests {
     }
 
     #[test]
-    fn audio_is_chosen_only_when_there_is_no_playable_video() {
+    fn audio_is_chosen_only_when_there_is_no_video() {
         let files = vec![file("album/track.mp3", 5), file("album/cover.png", 900)];
         assert_eq!(best_to_play(&files), Some(0));
+    }
 
-        let unplayable = vec![file("film/feature.mkv", 700), file("film/notes.txt", 1)];
-        assert_eq!(best_to_play(&unplayable), None);
+    #[test]
+    fn a_convertible_container_is_offered_when_nothing_native_exists() {
+        // This is the shape of a great many Internet Archive items: the only
+        // video is an MPEG program stream. Offering nothing would mean the
+        // player refused material it can perfectly well convert.
+        let files = vec![file("film/notes.txt", 1), file("film/feature.mpeg", 700)];
+        assert_eq!(best_to_play(&files), Some(1));
+    }
+
+    #[test]
+    fn a_native_container_still_wins_over_a_convertible_one() {
+        // Converting costs CPU and quality; if there is an MP4 sitting there,
+        // it should be preferred even when it is smaller.
+        let files = vec![file("film/feature.mkv", 900), file("film/feature.mp4", 300)];
+        assert_eq!(best_to_play(&files), Some(1));
+    }
+
+    #[test]
+    fn a_torrent_with_no_media_at_all_suggests_nothing() {
+        let files = vec![file("stuff/readme.txt", 10), file("stuff/cover.png", 900)];
+        assert_eq!(best_to_play(&files), None);
     }
 }

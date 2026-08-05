@@ -144,12 +144,37 @@ impl Rate {
     }
 }
 
+/// How many segments to keep. Enough that scrubbing back and forth over the
+/// same stretch is instant, small enough that it cannot grow without bound.
+const SEGMENT_CACHE: usize = 24;
+
+/// Concurrent ffmpeg processes. A viewer dragging the scrubber can ask for a
+/// great many segments at once, and every encoder competes with the download
+/// that feeds it.
+const MAX_TRANSCODES: usize = 3;
+
 pub struct AppState {
     pub config: ServeConfig,
     /// Used only to turn an archive.org identifier into a torrent. Held here
     /// rather than built per request so its rate limiting actually applies.
     pub ia: dipper_ia::IaClient,
+    /// ffmpeg, if this machine has it. `None` disables transcoding and the
+    /// player falls back to offering downloads.
+    pub tools: Option<crate::ffmpeg::Tools>,
+    /// Where this server can be reached, so ffmpeg can read back through our
+    /// own range endpoint and inherit the piece prioritisation for free.
+    pub self_base: Mutex<String>,
+    pub transcodes: tokio::sync::Semaphore,
     torrents: Mutex<HashMap<InfoHash, Arc<Torrent>>>,
+    probes: Mutex<HashMap<(InfoHash, usize), Arc<crate::ffmpeg::Probe>>>,
+    segments: Mutex<SegmentCache>,
+}
+
+/// A small bounded cache of generated segments, oldest evicted first.
+#[derive(Default)]
+struct SegmentCache {
+    order: std::collections::VecDeque<(InfoHash, usize, u32)>,
+    data: HashMap<(InfoHash, usize, u32), Arc<Vec<u8>>>,
 }
 
 impl AppState {
@@ -157,8 +182,72 @@ impl AppState {
         Self {
             config,
             ia: dipper_ia::IaClient::new().expect("the HTTP client failed to build"),
+            tools: None,
+            self_base: Mutex::new(String::new()),
+            transcodes: tokio::sync::Semaphore::new(MAX_TRANSCODES),
             torrents: Mutex::new(HashMap::new()),
+            probes: Mutex::new(HashMap::new()),
+            segments: Mutex::new(SegmentCache::default()),
         }
+    }
+
+    /// The URL ffmpeg should read a file from: our own range endpoint.
+    pub fn stream_url(&self, hash: &str, file: usize) -> String {
+        let base = self.self_base.lock().expect("self_base lock").clone();
+        format!("{base}/stream/{hash}/{file}")
+    }
+
+    /// Probe a file, remembering the answer. What is in a file never changes,
+    /// and probing costs a round trip plus however long the header takes to
+    /// arrive from the swarm.
+    pub async fn probe(
+        &self,
+        tools: &crate::ffmpeg::Tools,
+        hash: &InfoHash,
+        file: usize,
+    ) -> anyhow::Result<Arc<crate::ffmpeg::Probe>> {
+        if let Some(cached) = self.probes.lock().expect("probes lock").get(&(*hash, file)) {
+            return Ok(Arc::clone(cached));
+        }
+        let probe = Arc::new(tools.probe(&self.stream_url(&hash.to_hex(), file)).await?);
+        self.probes
+            .lock()
+            .expect("probes lock")
+            .insert((*hash, file), Arc::clone(&probe));
+        Ok(probe)
+    }
+
+    pub fn cached_segment(&self, hash: &InfoHash, file: usize, index: u32) -> Option<Arc<Vec<u8>>> {
+        self.segments
+            .lock()
+            .expect("segments lock")
+            .data
+            .get(&(*hash, file, index))
+            .map(Arc::clone)
+    }
+
+    pub fn cache_segment(&self, hash: &InfoHash, file: usize, index: u32, data: Arc<Vec<u8>>) {
+        let mut cache = self.segments.lock().expect("segments lock");
+        let key = (*hash, file, index);
+        if cache.data.insert(key, data).is_none() {
+            cache.order.push_back(key);
+        }
+        while cache.order.len() > SEGMENT_CACHE {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.data.remove(&oldest);
+            }
+        }
+    }
+
+    /// Forget everything remembered about a torrent that is going away.
+    fn forget(&self, hash: &InfoHash) {
+        self.probes
+            .lock()
+            .expect("probes lock")
+            .retain(|(held, _), _| held != hash);
+        let mut cache = self.segments.lock().expect("segments lock");
+        cache.data.retain(|(held, _, _), _| held != hash);
+        cache.order.retain(|(held, _, _)| held != hash);
     }
 
     pub fn get(&self, hash: &InfoHash) -> Option<Arc<Torrent>> {
@@ -173,6 +262,9 @@ impl AppState {
     }
 
     pub fn remove(&self, hash: &InfoHash) -> Option<Arc<Torrent>> {
+        // Drop the probe and any cached segments with it, or a torrent
+        // re-added later would be served another one's frames.
+        self.forget(hash);
         self.torrents.lock().expect("torrents lock").remove(hash)
     }
 
