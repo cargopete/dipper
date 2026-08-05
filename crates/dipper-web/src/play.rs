@@ -30,11 +30,21 @@ use crate::fmp4;
 #[serde(tag = "mode", rename_all = "lowercase")]
 pub enum PlayInfo {
     /// Browsers open this as it is. Use `/stream`.
-    Direct { url: String, tracks: Vec<Track> },
+    Direct {
+        url: String,
+        /// Size of this file, so the page can work out its bitrate once the
+        /// browser reports a duration, and say whether the swarm can keep up.
+        length: u64,
+        tracks: Vec<Track>,
+    },
     /// Needs converting. Drive MediaSource against the segment endpoints.
     Transcode {
         mime: String,
         duration: f64,
+        /// Size of this file. Divided by duration this gives the bitrate
+        /// playback must be fed at, which is the only figure that decides
+        /// whether a torrent can be watched live or merely downloaded.
+        length: u64,
         segments: u32,
         segment_seconds: f64,
         init: String,
@@ -89,6 +99,7 @@ pub async fn info(
     if classified.playback == Playback::Native {
         return Ok(Json(PlayInfo::Direct {
             url: stream_url,
+            length: entry.length,
             tracks,
         }));
     }
@@ -139,6 +150,7 @@ pub async fn info(
     Ok(Json(PlayInfo::Transcode {
         mime: plan.mime.clone(),
         duration: probe.duration,
+        length: entry.length,
         segments: ffmpeg::segment_count(probe.duration),
         segment_seconds: ffmpeg::SEGMENT_SECONDS,
         init: format!("/api/play/{hash}/{file}/init.mp4"),

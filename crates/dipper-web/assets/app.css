@@ -364,6 +364,20 @@ video {
   font-weight: 600;
 }
 
+/* An honest word about whether this can be watched live, rather than letting
+ * the viewer discover it by stalling. */
+.advisory {
+  margin: 0;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--bad);
+  border-top: 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+.advisory strong { color: var(--ink); font-weight: 600; }
+.advisory .mono { color: var(--ink); }
+
 /* ---- piece map ---------------------------------------------------------
  * The only thing on the page that moves, and it earns it: this is what tells
  * you whether a stutter is dipper being slow or the swarm being thin. */

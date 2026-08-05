@@ -37,6 +37,7 @@ const el = {
   files: $("file-list"),
   map: $("piecemap"),
   mapStatus: $("piecemap-status"),
+  advisory: $("advisory"),
   library: $("library"),
   libraryList: $("library-list"),
   peers: $("t-peers"),
@@ -50,6 +51,8 @@ let current = null;   // the TorrentInfo we are showing
 let playing = null;   // index of the file in the player
 let poller = null;
 let shelves = [];
+let lastStats = null; // the most recent poll, for the feasibility advisory
+let playInfo = null;  // what /api/play said about the file being played
 
 /* ---- formatting -------------------------------------------------------- */
 
@@ -176,6 +179,9 @@ let mse = null; // the transcoding session, when there is one
 /** Seconds of buffered video to stay ahead of the playhead. */
 const TARGET_BUFFER = 24;
 
+/** Segments to gather before playback starts, so the opening does not stutter. */
+const STARTUP_SEGMENTS = 3;
+
 function once(target, event) {
   return new Promise((resolve) => target.addEventListener(event, resolve, { once: true }));
 }
@@ -210,7 +216,7 @@ async function startTranscode(info) {
 
   const source = new MediaSource();
   const url = URL.createObjectURL(source);
-  const session = { source, url, info, next: 0, stopped: false, buffer: null };
+  const session = { source, url, info, next: 0, stopped: false, buffer: null, primed: false };
   mse = session;
 
   show(el.video, true);
@@ -286,6 +292,14 @@ async function pump() {
     await appendWithEviction(buffer, bytes);
     session.next = index + 1;
     setStatus("");
+
+    // Hold off until there is a runway. Starting the instant segment 0 lands
+    // means the first hiccup is a visible stall; a few segments of headroom
+    // absorbs ordinary jitter and costs a couple of seconds.
+    if (!session.primed && (session.next >= STARTUP_SEGMENTS || session.next >= info.segments)) {
+      session.primed = true;
+      el.video.play().catch(() => {});
+    }
   } catch (err) {
     if (!session.stopped) {
       showViewerNote(`Playback stopped at segment ${index}: ${err.message}`);
@@ -298,6 +312,66 @@ async function pump() {
   if (mse !== session || session.stopped) return;
   // Back off when waiting on the swarm; otherwise keep the buffer topped up.
   setTimeout(pump, waiting ? 2000 : 0);
+}
+
+/* ---- can this actually be watched? -------------------------------------
+ *
+ * Only one comparison decides it: the rate the swarm supplies against the rate
+ * playback consumes. A percentage-downloaded threshold tells you nothing,
+ * because 20% of a 25 MB cartoon and 20% of an 8 GB film are entirely
+ * different propositions and neither predicts a stall.
+ *
+ * If the swarm is slower than the bitrate, no amount of waiting helps unless
+ * you wait for the whole shortfall, which is what the arithmetic below works
+ * out and says out loud. */
+
+function feasibility() {
+  if (!playInfo || !lastStats || playing === null) return null;
+  if (lastStats.complete) return { ok: true };
+
+  const length = playInfo.length;
+  // Transcoding knows the duration from the probe; native playback learns it
+  // from the browser once metadata has loaded.
+  const duration = playInfo.duration || el.video.duration;
+  if (!length || !duration || !isFinite(duration) || duration <= 0) return null;
+
+  const bitrate = length / duration;
+  const rate = lastStats.rate;
+  if (rate >= bitrate) return { ok: true };
+
+  // Start now and you run out at some point. To watch through uninterrupted
+  // the download must finish as playback does, which needs this head start.
+  const wait = rate > 0 ? (duration * (bitrate - rate)) / rate : Infinity;
+  return { ok: false, bitrate, rate, wait, hopeless: rate < bitrate * 0.05 };
+}
+
+function showAdvisory() {
+  const verdict = feasibility();
+  if (!verdict || verdict.ok) {
+    show(el.advisory, false);
+    return;
+  }
+
+  el.advisory.replaceChildren();
+  const strong = document.createElement("strong");
+  const rest = document.createElement("span");
+
+  if (verdict.hopeless) {
+    strong.textContent = "This cannot be watched live. ";
+    rest.textContent =
+      `The swarm is supplying ${bytes(Math.round(verdict.rate))}/s and playback ` +
+      `needs ${bytes(Math.round(verdict.bitrate))}/s. Leave it downloading and ` +
+      "watch when it has finished, or tick Keep offline so it survives.";
+  } else {
+    strong.textContent = "This will stall. ";
+    rest.textContent =
+      `The swarm is supplying ${bytes(Math.round(verdict.rate))}/s against the ` +
+      `${bytes(Math.round(verdict.bitrate))}/s playback needs. Waiting about ` +
+      `${seconds(verdict.wait)} would let it run through without interruption.`;
+  }
+
+  el.advisory.append(strong, rest);
+  show(el.advisory, true);
 }
 
 /** A line under the piece map, for when playback is waiting on the download. */
@@ -403,6 +477,8 @@ async function play(index) {
 
   teardown();
   playing = index;
+  playInfo = null;
+  show(el.advisory, false);
   renderFiles();
   teardown();
   el.video.removeAttribute("src");
@@ -420,6 +496,7 @@ async function play(index) {
   }
   if (playing !== index) return; // the viewer moved on while we asked
 
+  playInfo = info;
   attachTracks(info.tracks);
 
   if (info.mode === "unsupported") {
@@ -439,7 +516,6 @@ async function play(index) {
   }
 
   await startTranscode(info);
-  el.video.play().catch(() => {});
 }
 
 /* A container the browser opens can still hold a codec it will not decode,
@@ -547,6 +623,8 @@ function renderTorrent(info) {
 }
 
 function renderStats(stats) {
+  lastStats = stats;
+  showAdvisory();
   el.peers.textContent = stats.peers;
   el.rate.textContent = `${bytes(Math.round(stats.rate))}/s`;
   el.pieces.textContent = `${stats.pieces_have} / ${stats.pieces_total}`;
