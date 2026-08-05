@@ -328,23 +328,38 @@ pub async fn sweep(state: Arc<AppState>) {
     }
 }
 
+/// The page and its assets are baked into the binary, so a new build means new
+/// assets. Without this a browser happily keeps serving the previous build's
+/// JavaScript from cache, and the resulting "I already fixed that" is a
+/// thoroughly miserable way to spend an afternoon.
+const NO_CACHE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-cache");
+
 pub async fn index() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (NO_CACHE.0, NO_CACHE.1),
+        ],
         include_str!("../assets/index.html"),
     )
 }
 
 pub async fn stylesheet() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (NO_CACHE.0, NO_CACHE.1),
+        ],
         include_str!("../assets/app.css"),
     )
 }
 
 pub async fn script() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (NO_CACHE.0, NO_CACHE.1),
+        ],
         include_str!("../assets/app.js"),
     )
 }

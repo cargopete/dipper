@@ -43,6 +43,13 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* The `hidden` attribute is enforced by the browser's own stylesheet, which
+ * any author rule setting `display` quietly outranks. Several panels here
+ * carry both `hidden` and a class that lays them out as a grid, so without
+ * this they can never be hidden at all. Worth the !important: the attribute
+ * means hidden, and nothing else in this file should get a say. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--paper);
@@ -314,7 +321,8 @@ video {
   display: block;
   background: #000;
 }
-video[hidden] { display: none; }
+/* `video[hidden]` used to need spelling out here. The global rule above now
+ * covers it, and every other element that carries the attribute. */
 
 .viewer-note {
   margin: 0;
