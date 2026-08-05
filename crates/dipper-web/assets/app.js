@@ -159,44 +159,286 @@ function bufferedAhead() {
   return 0;
 }
 
-function play(index) {
-  const file = current.files[index];
-  if (!file || !file.playable) return;
+/* ---- the transcoding player --------------------------------------------
+ *
+ * For containers browsers cannot open, dipper converts on the fly and hands
+ * back fragmented MP4 in six second pieces. Media Source Extensions is the
+ * only way to feed a growing stream to a <video> element while keeping the
+ * scrubber working.
+ *
+ * Every segment ffmpeg produces starts at timestamp zero, so each one is
+ * placed on the real timeline with `timestampOffset` before it is appended.
+ * Doing the offset here rather than in ffmpeg avoids a nasty interaction
+ * between its duration limit and a shifted output clock. */
 
-  playing = index;
+let mse = null; // the transcoding session, when there is one
+
+/** Seconds of buffered video to stay ahead of the playhead. */
+const TARGET_BUFFER = 24;
+
+function once(target, event) {
+  return new Promise((resolve) => target.addEventListener(event, resolve, { once: true }));
+}
+
+/** Wait for a SourceBuffer to go idle; appending while busy throws. */
+function idle(buffer) {
+  return buffer.updating ? once(buffer, "updateend") : Promise.resolve();
+}
+
+function teardown() {
+  if (!mse) return;
+  mse.stopped = true;
+  try {
+    if (mse.source && mse.source.readyState === "open") mse.source.endOfStream();
+  } catch {
+    // Already torn down by the browser. Nothing to do.
+  }
+  if (mse.url) URL.revokeObjectURL(mse.url);
+  mse = null;
+}
+
+async function startTranscode(info) {
+  teardown();
+
+  if (!window.MediaSource || !MediaSource.isTypeSupported(info.mime)) {
+    showViewerNote(
+      `This file needs converting, and your browser will not accept the result (${info.mime}). ` +
+        "Try Chrome, Firefox or Safari, or download it and use VLC."
+    );
+    return;
+  }
+
+  const source = new MediaSource();
+  const url = URL.createObjectURL(source);
+  const session = { source, url, info, next: 0, stopped: false, buffer: null };
+  mse = session;
+
   show(el.video, true);
   show(el.viewerNote, false);
-  el.video.src = `/stream/${current.infohash}/${index}`;
-  el.video.load();
-  el.video.play().catch(() => {
-    // Autoplay refused. The controls are right there, so this is not a
-    // problem worth shouting about.
-  });
+  el.video.src = url;
+
+  await once(source, "sourceopen");
+  if (session.stopped) return;
+
+  try {
+    source.duration = info.duration;
+    const buffer = source.addSourceBuffer(info.mime);
+    // Segments carry their own timing; we place them explicitly.
+    buffer.mode = "segments";
+    session.buffer = buffer;
+
+    const init = await fetch(info.init);
+    if (!init.ok) throw new Error(await errorText(init));
+    await idle(buffer);
+    buffer.appendBuffer(await init.arrayBuffer());
+    await once(buffer, "updateend");
+
+    pump();
+  } catch (err) {
+    if (!session.stopped) showViewerNote(`Could not start playback: ${err.message}`);
+  }
+}
+
+/** Keep the buffer ahead of the playhead, one segment at a time. */
+async function pump() {
+  const session = mse;
+  if (!session || session.stopped || session.busy) return;
+  const { buffer, info } = session;
+  if (!buffer || buffer.updating) return;
+
+  if (session.next >= info.segments) {
+    // Everything has been appended, so tell the element the stream is whole.
+    // Without this the scrubber never reaches the end.
+    if (session.source.readyState === "open") {
+      try {
+        session.source.endOfStream();
+      } catch {
+        // Racing a teardown; harmless.
+      }
+    }
+    return;
+  }
+
+  if (bufferedAhead() > TARGET_BUFFER) return;
+
+  session.busy = true;
+  const index = session.next;
+  try {
+    const response = await fetch(`${info.segment_prefix}${index}`);
+    if (!response.ok) throw new Error(await errorText(response));
+    const bytes = await response.arrayBuffer();
+    if (session.stopped || session !== mse) return;
+
+    await idle(buffer);
+    buffer.timestampOffset = index * info.segment_seconds;
+    await appendWithEviction(buffer, bytes);
+    session.next = index + 1;
+  } catch (err) {
+    if (!session.stopped) {
+      showViewerNote(`Playback stopped at segment ${index}: ${err.message}`);
+      session.stopped = true;
+    }
+  } finally {
+    session.busy = false;
+  }
+  // Keep going until the buffer is comfortable.
+  if (mse === session && !session.stopped) setTimeout(pump, 0);
+}
+
+/** Append, making room by dropping what is well behind the playhead. */
+async function appendWithEviction(buffer, bytes) {
+  try {
+    buffer.appendBuffer(bytes);
+    await once(buffer, "updateend");
+  } catch (err) {
+    if (err.name !== "QuotaExceededError") throw err;
+
+    // The buffer is full. Everything more than a minute behind the playhead
+    // has been watched and can go. This is the failure every MSE player hits
+    // first, and it presents as playback simply stopping.
+    const cutoff = Math.max(0, el.video.currentTime - 60);
+    if (cutoff > 0) {
+      await idle(buffer);
+      buffer.remove(0, cutoff);
+      await once(buffer, "updateend");
+    }
+    await idle(buffer);
+    buffer.appendBuffer(bytes);
+    await once(buffer, "updateend");
+  }
+}
+
+/** A seek may land outside what has been appended, so start again there. */
+async function reseek() {
+  const session = mse;
+  if (!session || session.stopped || !session.buffer) return;
+
+  const target = el.video.currentTime;
+  // Already buffered? Then the element will handle it by itself.
+  for (let i = 0; i < el.video.buffered.length; i += 1) {
+    if (el.video.buffered.start(i) <= target && target < el.video.buffered.end(i)) return;
+  }
+
+  const wanted = Math.floor(target / session.info.segment_seconds);
+  if (wanted === session.next) return;
+
+  session.next = wanted;
+  try {
+    await idle(session.buffer);
+    // Drop everything: what is buffered is for a part of the film the viewer
+    // has just left, and keeping it only invites a quota failure later.
+    if (session.source.readyState === "open" && session.source.duration > 0) {
+      session.buffer.remove(0, session.source.duration);
+      await once(session.buffer, "updateend");
+    }
+  } catch {
+    // A failed eviction is survivable; the append may still succeed.
+  }
+  pump();
+}
+
+async function errorText(response) {
+  const body = await response.json().catch(() => null);
+  return (body && body.error) || `${response.status} ${response.statusText}`;
+}
+
+function showViewerNote(message, download) {
+  show(el.video, false);
+  show(el.viewerNote, true);
+  el.viewerNote.replaceChildren();
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.viewerNote.append(text);
+  if (download) {
+    const link = document.createElement("a");
+    link.href = download;
+    link.textContent = "Download this file";
+    link.style.display = "block";
+    link.style.marginTop = "0.75rem";
+    link.style.color = "inherit";
+    el.viewerNote.append(link);
+  }
+}
+
+/** Offer any subtitle tracks the server found. */
+function attachTracks(tracks) {
+  for (const old of [...el.video.querySelectorAll("track")]) old.remove();
+  for (const [index, track] of (tracks || []).entries()) {
+    const node = document.createElement("track");
+    node.kind = "subtitles";
+    node.label = track.label;
+    if (track.language) node.srclang = track.language;
+    node.src = track.url;
+    if (index === 0) node.default = true;
+    el.video.append(node);
+  }
+}
+
+/** Play a file, whatever it turns out to be. */
+async function play(index) {
+  const file = current.files[index];
+  if (!file) return;
+
+  teardown();
+  playing = index;
   renderFiles();
+  teardown();
+  el.video.removeAttribute("src");
+  el.video.load();
+  show(el.video, false);
+  show(el.viewerNote, true);
+  el.viewerNote.textContent = "Working out how to play this";
+
+  let info;
+  try {
+    info = await api(`/api/play/${current.infohash}/${index}`);
+  } catch (err) {
+    showViewerNote(err.message);
+    return;
+  }
+  if (playing !== index) return; // the viewer moved on while we asked
+
+  attachTracks(info.tracks);
+
+  if (info.mode === "unsupported") {
+    showViewerNote(info.reason, info.download);
+    return;
+  }
+
+  if (info.mode === "direct") {
+    show(el.video, true);
+    show(el.viewerNote, false);
+    el.video.src = info.url;
+    el.video.load();
+    el.video.play().catch(() => {
+      // Autoplay refused. The controls are right there.
+    });
+    return;
+  }
+
+  await startTranscode(info);
+  el.video.play().catch(() => {});
 }
 
 /* A container the browser opens can still hold a codec it will not decode,
  * and there is no way to know without parsing the file. So we try, and say
  * something honest when it fails rather than spinning forever. */
 el.video.addEventListener("error", () => {
-  if (playing === null) return;
-  const file = current.files[playing];
-  show(el.video, false);
-  show(el.viewerNote, true);
-  el.viewerNote.innerHTML = "";
-  const message = document.createElement("span");
-  message.textContent =
-    "Your browser will not decode this file. The container is one it opens, " +
-    "so the codec inside is probably the trouble. It has still downloaded, " +
-    "and VLC will play it.";
-  const link = document.createElement("a");
-  link.href = `/stream/${current.infohash}/${playing}?download=true`;
-  link.textContent = `Download ${file.name}`;
-  link.style.display = "block";
-  link.style.marginTop = "0.75rem";
-  link.style.color = "inherit";
-  el.viewerNote.append(message, link);
+  if (playing === null || !current) return;
+  // A transcoding session reports its own failures with more detail.
+  if (mse && !mse.stopped) return;
+  showViewerNote(
+    "Your browser will not decode this file. The container is one it opens, so " +
+      "the codec inside is probably the trouble. It has still downloaded, and " +
+      "VLC will play it.",
+    `/stream/${current.infohash}/${playing}?download=true`
+  );
 });
+
+// Keep the transcoding buffer topped up, and follow the viewer when they seek.
+el.video.addEventListener("timeupdate", () => pump());
+el.video.addEventListener("waiting", () => pump());
+el.video.addEventListener("seeking", () => reseek());
 
 /* ---- rendering --------------------------------------------------------- */
 
@@ -227,7 +469,10 @@ function renderFiles() {
     size.textContent = bytes(file.length);
 
     const action = document.createElement("span");
-    if (file.playable) {
+    // Anything that is video or audio gets a Play button now, even in a
+    // container browsers cannot open: the server decides whether it can be
+    // converted, and says so plainly if it cannot.
+    if (file.kind === "video" || file.kind === "audio") {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "button-small";
@@ -336,6 +581,7 @@ function renderLibrary(all) {
       await api(`/api/torrents/${item.infohash}`, { method: "DELETE" });
       if (current && current.infohash === item.infohash) {
         show(el.torrent, false);
+        teardown();
         el.video.removeAttribute("src");
         el.video.load();
         current = null;
@@ -539,6 +785,7 @@ el.discard.addEventListener("click", async () => {
   if (!window.confirm(`Delete ${current.name} and its files from disk?`)) return;
   await api(`/api/torrents/${current.infohash}`, { method: "DELETE" });
   show(el.torrent, false);
+  teardown();
   el.video.removeAttribute("src");
   el.video.load();
   current = null;

@@ -37,10 +37,32 @@ the tail. A front-to-back sequential picker never serves it and playback hangs
 forever. Letting the requests steer the picker handles both layouts, and makes
 seeking work for nothing.
 
-Browsers only open some containers, so `.mp4`, `.m4v`, `.webm` and the common
-audio formats stream. Matroska and AVI are listed with an explanation and a
-download link rather than a player that silently fails, since remuxing them
-would mean shipping ffmpeg.
+### Containers browsers will not open
+
+`.mp4`, `.m4v`, `.webm` and the common audio formats stream directly. Anything
+else is converted as it plays, if ffmpeg is on your PATH.
+
+This matters more than it sounds for the Internet Archive, whose moving image
+collections predate MP4 being the default. A typical Prelinger item is an MPEG
+program stream carrying MPEG-2 video and AC-3 audio: three layers, none of
+which any browser opens, and all of it public domain.
+
+Conversion is on demand and stateless. Each six second segment is a fresh
+ffmpeg reading dipper's own range endpoint over HTTP, which means the piece
+picker steers for it with no extra plumbing, and seeking anywhere costs one
+segment rather than restarting a session. Streams already in a browser-friendly
+codec are copied rather than re-encoded, so an H.264 MKV is only rewrapped.
+Hardware encoding is used where available (VideoToolbox on macOS), `libx264`
+otherwise.
+
+Without ffmpeg, dipper behaves as it always did: those files are listed with an
+explanation and a download link. Transcoding is an enhancement, not a
+requirement, and the binary still works on its own.
+
+Subtitles are picked up too, both `.srt` files sitting beside the video and
+tracks embedded in it, converted to WebVTT. SubRip files are frequently not
+UTF-8, so they fall back to a Windows-1252 decode rather than filling the
+screen with replacement characters.
 
 Streaming *is* downloading: every piece is SHA-1 verified and written to disk,
 so anything you watch is also saved. Torrents live in the user cache directory
@@ -169,7 +191,7 @@ feeds it a lying peer.
 | `dipper-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
 | `dipper-ia` | archive.org client: metadata API, search |
 | `dipper-index` | local tantivy catalogue over harvested metadata |
-| `dipper-web` | the local player: range-driven streaming over axum, page embedded in the binary |
+| `dipper-web` | the local player: range-driven streaming, on-demand transcoding, page embedded in the binary |
 | `dipper-cli` | the `dipper` binary |
 
 ## Tests
