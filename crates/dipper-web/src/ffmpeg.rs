@@ -57,12 +57,12 @@ impl Tools {
             .output()
             .await
             .ok()?;
-        let video_encoder = if String::from_utf8_lossy(&listing.stdout).contains("h264_videotoolbox")
-        {
-            "h264_videotoolbox"
-        } else {
-            "libx264"
-        };
+        let video_encoder =
+            if String::from_utf8_lossy(&listing.stdout).contains("h264_videotoolbox") {
+                "h264_videotoolbox"
+            } else {
+                "libx264"
+            };
 
         tracing::info!(encoder = video_encoder, "transcoding is available");
         Some(Self {

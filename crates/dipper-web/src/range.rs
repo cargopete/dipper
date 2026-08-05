@@ -107,11 +107,17 @@ mod tests {
         // What a `<video>` element opens with, near enough universally.
         assert_eq!(
             parse_str("bytes=0-", 1000),
-            Requested::Partial { start: 0, end: 1000 }
+            Requested::Partial {
+                start: 0,
+                end: 1000
+            }
         );
         assert_eq!(
             parse_str("bytes=600-", 1000),
-            Requested::Partial { start: 600, end: 1000 }
+            Requested::Partial {
+                start: 600,
+                end: 1000
+            }
         );
     }
 
@@ -123,12 +129,18 @@ mod tests {
         );
         assert_eq!(
             parse_str("bytes=100-199", 1000),
-            Requested::Partial { start: 100, end: 200 }
+            Requested::Partial {
+                start: 100,
+                end: 200
+            }
         );
         // The last byte of the file, asked for precisely.
         assert_eq!(
             parse_str("bytes=999-999", 1000),
-            Requested::Partial { start: 999, end: 1000 }
+            Requested::Partial {
+                start: 999,
+                end: 1000
+            }
         );
     }
 
@@ -138,12 +150,18 @@ mod tests {
         // goes looking for the index box at the end of the file.
         assert_eq!(
             parse_str("bytes=-500", 1000),
-            Requested::Partial { start: 500, end: 1000 }
+            Requested::Partial {
+                start: 500,
+                end: 1000
+            }
         );
         // A suffix longer than the file is the whole file, not an error.
         assert_eq!(
             parse_str("bytes=-9999", 1000),
-            Requested::Partial { start: 0, end: 1000 }
+            Requested::Partial {
+                start: 0,
+                end: 1000
+            }
         );
     }
 
@@ -151,7 +169,10 @@ mod tests {
     fn an_end_past_the_file_is_clamped_rather_than_refused() {
         assert_eq!(
             parse_str("bytes=900-99999", 1000),
-            Requested::Partial { start: 900, end: 1000 }
+            Requested::Partial {
+                start: 900,
+                end: 1000
+            }
         );
     }
 

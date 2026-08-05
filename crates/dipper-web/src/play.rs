@@ -11,19 +11,19 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use dipper_bt::InfoHash;
 use serde::Serialize;
 
 use crate::ffmpeg::{self, Plan, Probe};
+use crate::fmp4;
 use crate::media::{self, Playback};
 use crate::routes::ApiError;
 use crate::state::{AppState, Torrent};
 use crate::subtitles;
-use crate::fmp4;
 
 /// How the page should play a file.
 #[derive(Debug, Serialize)]
@@ -358,8 +358,6 @@ fn estimated_span(offset: u64, length: u64, duration: f64, index: u32) -> Option
     Some((from, span))
 }
 
-
-
 fn mp4_response(body: Vec<u8>) -> Response {
     (
         [
@@ -391,7 +389,9 @@ pub async fn sidecar(
     // Refuse anything implausible rather than buffering a mislabelled film.
     const LIMIT: u64 = 8 * 1024 * 1024;
     if entry.length > LIMIT {
-        return Err(ApiError::bad_request("that subtitle file is implausibly large"));
+        return Err(ApiError::bad_request(
+            "that subtitle file is implausibly large",
+        ));
     }
 
     let span = torrent.meta.pieces_for_span(entry.offset, entry.length);
@@ -464,7 +464,10 @@ mod tests {
         // Ten minutes, so each six second segment is a hundredth of the file.
         let (early, _) = estimated_span(0, length, 600.0, 1).unwrap();
         let (late, _) = estimated_span(0, length, 600.0, 50).unwrap();
-        assert!(late > early, "segment 50 should sit further in than segment 1");
+        assert!(
+            late > early,
+            "segment 50 should sit further in than segment 1"
+        );
         // Segment 50 is halfway through ten minutes.
         let halfway = length / 2;
         let margin = (length as f64 * 0.02) as u64;

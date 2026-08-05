@@ -7,9 +7,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use dipper_bt::Strategy;
 use dipper_bt::metainfo::Metainfo;
 use dipper_bt::session::{self, DownloadConfig, VerifyPolicy};
-use dipper_bt::Strategy;
 use dipper_web::state::{AppState, ServeConfig, Torrent};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -330,13 +330,12 @@ async fn the_stats_endpoint_describes_the_running_download() {
         .await
         .unwrap();
 
-    let stats: serde_json::Value =
-        reqwest::get(format!("{}/api/torrents/{}", h.base, h.hash))
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+    let stats: serde_json::Value = reqwest::get(format!("{}/api/torrents/{}", h.base, h.hash))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
     assert_eq!(stats["name"], "an-item");
     assert_eq!(stats["pieces_total"], 5);

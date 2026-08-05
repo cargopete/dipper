@@ -198,7 +198,10 @@ mod tests {
         // Language suffixes are the usual convention.
         assert!(belongs_to("film.mkv", "film.en.srt"));
         // And torrents habitually put them in their own directory.
-        assert!(belongs_to("Some.Film/film.mkv", "Some.Film/Subs/film.en.srt"));
+        assert!(belongs_to(
+            "Some.Film/film.mkv",
+            "Some.Film/Subs/film.en.srt"
+        ));
         // A different film's subtitles must not attach themselves.
         assert!(!belongs_to("film.mkv", "other.srt"));
         assert!(!belongs_to("film.mkv", "film.mkv"));

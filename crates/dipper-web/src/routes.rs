@@ -246,7 +246,9 @@ pub async fn stats(
     Path(hash): Path<String>,
 ) -> Result<Json<Stats>, ApiError> {
     let hash = InfoHash::parse(&hash).map_err(|_| not_found("that is not an infohash"))?;
-    let torrent = state.get(&hash).ok_or_else(|| not_found("no such torrent"))?;
+    let torrent = state
+        .get(&hash)
+        .ok_or_else(|| not_found("no such torrent"))?;
     Ok(Json(stats_for(&hash, &torrent)))
 }
 
@@ -276,7 +278,9 @@ pub async fn keep(
     Json(request): Json<KeepRequest>,
 ) -> Result<Json<Stats>, ApiError> {
     let hash = InfoHash::parse(&hash).map_err(|_| not_found("that is not an infohash"))?;
-    let torrent = state.get(&hash).ok_or_else(|| not_found("no such torrent"))?;
+    let torrent = state
+        .get(&hash)
+        .ok_or_else(|| not_found("no such torrent"))?;
 
     torrent.set_kept(request.keep);
     if let Err(err) = mark_kept(&torrent.root, request.keep).await {
@@ -300,7 +304,9 @@ pub async fn remove(
     Path(hash): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let hash = InfoHash::parse(&hash).map_err(|_| not_found("that is not an infohash"))?;
-    let torrent = state.remove(&hash).ok_or_else(|| not_found("no such torrent"))?;
+    let torrent = state
+        .remove(&hash)
+        .ok_or_else(|| not_found("no such torrent"))?;
     discard(&state, &torrent).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -394,7 +400,10 @@ mod tests {
     fn a_complete_torrent_leads_with_a_zero_length_gap() {
         // The alternation always starts with missing, so a torrent whose first
         // piece is present opens with a zero. Readers depend on that.
-        assert_eq!(runs(&bits(10, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])), vec![0, 10]);
+        assert_eq!(
+            runs(&bits(10, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
+            vec![0, 10]
+        );
     }
 
     #[test]

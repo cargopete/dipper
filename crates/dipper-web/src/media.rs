@@ -37,8 +37,7 @@ pub struct Media {
     pub reason: Option<&'static str>,
 }
 
-const REMUX_REASON: &str =
-    "this container is not one browsers can open, so it needs converting first. \
+const REMUX_REASON: &str = "this container is not one browsers can open, so it needs converting first. \
      You can still download it and play it in VLC.";
 
 /// Classify by extension.
@@ -171,7 +170,10 @@ mod tests {
 
     #[test]
     fn extensions_are_case_insensitive_and_path_aware() {
-        assert_eq!(classify("Some.Film.2009/VIDEO.MP4").playback, Playback::Native);
+        assert_eq!(
+            classify("Some.Film.2009/VIDEO.MP4").playback,
+            Playback::Native
+        );
         // A dot in a directory name must not be mistaken for the extension.
         assert_eq!(classify("v1.2/README").playback, Playback::NotMedia);
         assert_eq!(classify("noextension").playback, Playback::NotMedia);

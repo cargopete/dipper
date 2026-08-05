@@ -13,9 +13,9 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 
+use dipper_bt::Strategy;
 use dipper_bt::metainfo::Metainfo;
 use dipper_bt::session::{self, DownloadConfig, VerifyPolicy};
-use dipper_bt::Strategy;
 use dipper_web::state::{AppState, ServeConfig, Torrent};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -245,7 +245,10 @@ async fn an_unplayable_container_is_offered_as_a_transcode() {
         .await
         .unwrap();
 
-    assert_eq!(info["mode"], "transcode", "an MPEG program stream needs converting");
+    assert_eq!(
+        info["mode"], "transcode",
+        "an MPEG program stream needs converting"
+    );
     // Both streams are unplayable, so neither can be passed through.
     assert_eq!(info["remux_only"], false);
     assert_eq!(

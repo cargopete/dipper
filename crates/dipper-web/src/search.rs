@@ -119,10 +119,7 @@ pub struct Results {
 /// network, which matters: a wrong filter here silently returns items dipper
 /// cannot download rather than failing.
 pub fn build_query(terms: &str, collection: Option<&str>) -> String {
-    let mut parts = vec![
-        "mediatype:(movies)".to_string(),
-        TORRENT_FILTER.to_string(),
-    ];
+    let mut parts = vec!["mediatype:(movies)".to_string(), TORRENT_FILTER.to_string()];
     if let Some(collection) = collection {
         parts.push(format!("collection:({collection})"));
     }
@@ -179,11 +176,7 @@ pub async fn handler(
         .filter(|hit| advanced::has_torrent(hit))
         .map(|hit| Hit {
             identifier: hit.identifier.clone(),
-            title: hit
-                .title()
-                .unwrap_or(&hit.identifier)
-                .trim()
-                .to_string(),
+            title: hit.title().unwrap_or(&hit.identifier).trim().to_string(),
             creator: hit.fields.get_str("creator").map(str::to_string),
             year: year_of(hit),
             size: hit.item_size(),

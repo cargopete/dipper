@@ -90,9 +90,11 @@ pub async fn handler(
         // No Range header at all: a download rather than a player. Serve the
         // whole file, however long that takes.
         Requested::Whole => (0, length, StatusCode::OK),
-        Requested::Partial { start, end } => {
-            (start, end.min(start + MAX_CHUNK), StatusCode::PARTIAL_CONTENT)
-        }
+        Requested::Partial { start, end } => (
+            start,
+            end.min(start + MAX_CHUNK),
+            StatusCode::PARTIAL_CONTENT,
+        ),
     };
 
     let served = end - start;
@@ -113,10 +115,7 @@ pub async fn handler(
     );
     // Caching a partially-downloaded torrent would be an excellent way to
     // serve someone a hole later.
-    response.insert(
-        header::CACHE_CONTROL,
-        "no-store".parse().expect("static"),
-    );
+    response.insert(header::CACHE_CONTROL, "no-store".parse().expect("static"));
     if status == StatusCode::PARTIAL_CONTENT {
         response.insert(
             header::CONTENT_RANGE,
@@ -154,7 +153,8 @@ async fn prioritise(torrent: &Arc<Torrent>, file: (u64, u64), global_start: u64,
     // Scale the prefetch to what the connection is actually managing. Fetching
     // 24 MB ahead at 200 KB/s means two minutes of work queued in front of the
     // piece the player is stalled on.
-    let readahead = ((torrent.rate() * READAHEAD_SECONDS) as u64).clamp(MIN_READAHEAD, MAX_READAHEAD);
+    let readahead =
+        ((torrent.rate() * READAHEAD_SECONDS) as u64).clamp(MIN_READAHEAD, MAX_READAHEAD);
 
     let mut spans = vec![
         // What the browser is waiting for right now.
@@ -165,7 +165,8 @@ async fn prioritise(torrent: &Arc<Torrent>, file: (u64, u64), global_start: u64,
 
     // The end of the file, for index boxes parked in the tail. Cheap, and the
     // difference between a non-faststart MP4 playing and hanging.
-    let tail_start = file_offset + file_length.saturating_sub(meta.piece_length * TAIL_PIECES as u64);
+    let tail_start =
+        file_offset + file_length.saturating_sub(meta.piece_length * TAIL_PIECES as u64);
     spans.push(meta.pieces_for_span(tail_start, meta.piece_length * TAIL_PIECES as u64));
 
     // The rest of this file, but nothing else in the torrent. Without this the
@@ -200,9 +201,8 @@ fn body(
             // The session stopped before this piece arrived. The bytes on disk
             // are still zeros, and serving them would hand out silent
             // corruption dressed up as a film.
-            let err = std::io::Error::other(format!(
-                "the download stopped before piece {piece} arrived"
-            ));
+            let err =
+                std::io::Error::other(format!("the download stopped before piece {piece} arrived"));
             // Park the cursor at the end so the stream terminates rather than
             // spinning on the same failure.
             return Some((Err(err), (torrent, end)));

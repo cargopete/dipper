@@ -347,13 +347,22 @@ mod tests {
         for index in 0..meta.piece_count() {
             let start = index * meta.piece_length as usize;
             let end = (start + meta.piece_length as usize).min(content.len());
-            storage.write_piece(index, &content[start..end]).await.unwrap();
+            storage
+                .write_piece(index, &content[start..end])
+                .await
+                .unwrap();
         }
 
         // Wholly inside the second file, which begins at 600.
-        assert_eq!(storage.read_range(700, 50).await.unwrap(), &content[700..750]);
+        assert_eq!(
+            storage.read_range(700, 50).await.unwrap(),
+            &content[700..750]
+        );
         // Across the boundary, which is the case worth having a test for.
-        assert_eq!(storage.read_range(580, 40).await.unwrap(), &content[580..620]);
+        assert_eq!(
+            storage.read_range(580, 40).await.unwrap(),
+            &content[580..620]
+        );
         // And the whole thing, spanning both files and every piece.
         assert_eq!(storage.read_range(0, 1000).await.unwrap(), content);
     }

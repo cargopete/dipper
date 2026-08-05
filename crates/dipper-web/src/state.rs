@@ -251,7 +251,11 @@ impl AppState {
     }
 
     pub fn get(&self, hash: &InfoHash) -> Option<Arc<Torrent>> {
-        self.torrents.lock().expect("torrents lock").get(hash).cloned()
+        self.torrents
+            .lock()
+            .expect("torrents lock")
+            .get(hash)
+            .cloned()
     }
 
     pub fn insert(&self, hash: InfoHash, torrent: Arc<Torrent>) {
@@ -321,7 +325,10 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(300));
         let measured = rate.sample(1000);
-        assert!(measured > 2_000.0, "roughly 1000 bytes over 0.3s, got {measured}");
+        assert!(
+            measured > 2_000.0,
+            "roughly 1000 bytes over 0.3s, got {measured}"
+        );
     }
 
     #[test]
@@ -335,7 +342,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             rate.sample(100_000);
         }
-        assert!(rate.smoothed < 1_000.0, "stalled but still claiming {}", rate.smoothed);
+        assert!(
+            rate.smoothed < 1_000.0,
+            "stalled but still claiming {}",
+            rate.smoothed
+        );
     }
 
     #[test]
