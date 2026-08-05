@@ -26,7 +26,10 @@ pub use error::{Error, Result};
 pub use infohash::InfoHash;
 pub use magnet::Magnet;
 pub use metainfo::{FileSlice, Metainfo, TorrentFile};
-pub use picker::Picker;
+pub use picker::{Picker, Strategy};
 pub use resume::ResumeState;
-pub use session::{DownloadConfig, DownloadSummary, Progress, VerifyPolicy, download};
+pub use session::{
+    DownloadConfig, DownloadSummary, Progress, SessionHandle, SessionStats, VerifyPolicy, download,
+    spawn,
+};
 pub use storage::Storage;

@@ -6,19 +6,21 @@
 //! so a peer dying mid-piece just releases it back.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::error::{Error, Result};
 use crate::infohash::generate_peer_id;
 use crate::metainfo::Metainfo;
 use crate::peer::PeerConnection;
-use crate::picker::Picker;
+use crate::picker::{Picker, Strategy};
 use crate::resume::ResumeState;
 use crate::storage::Storage;
 use crate::webseed::Webseed;
@@ -40,6 +42,9 @@ pub struct DownloadConfig {
     pub port: u16,
     /// How to work out what is already on disk.
     pub verify: VerifyPolicy,
+    /// Which piece to fetch next. Leave as [`Strategy::Rarest`] unless a
+    /// reader is waiting on specific bytes, which is what [`spawn`] is for.
+    pub strategy: Strategy,
 }
 
 /// What to do about data that is already in the download directory.
@@ -66,6 +71,7 @@ impl Default for DownloadConfig {
             webseed_timeout: Duration::from_secs(60),
             port: 6881,
             verify: VerifyPolicy::Auto,
+            strategy: Strategy::Rarest,
         }
     }
 }
@@ -144,6 +150,26 @@ struct Stats {
     from_peers: AtomicU64,
     from_webseeds: AtomicU64,
     failed_hashes: AtomicU64,
+    /// Peers currently handshaked and running, for live reporting.
+    connected: AtomicU64,
+}
+
+/// Keeps [`Stats::connected`] honest across every way a peer task can end,
+/// including the error paths. A plain decrement at the bottom of `run_peer`
+/// would leak a count on every `?`.
+struct PeerCount(Arc<Stats>);
+
+impl PeerCount {
+    fn new(stats: &Arc<Stats>) -> Self {
+        stats.connected.fetch_add(1, Ordering::Relaxed);
+        Self(Arc::clone(stats))
+    }
+}
+
+impl Drop for PeerCount {
+    fn drop(&mut self) {
+        self.0.connected.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Keeps the resume sidecar roughly up to date without writing it on every
@@ -214,11 +240,14 @@ impl ResumeWriter {
 
 struct Shared {
     meta: Metainfo,
-    storage: Storage,
-    picker: Mutex<Picker>,
+    storage: Arc<Storage>,
+    picker: Arc<Mutex<Picker>>,
     progress: mpsc::UnboundedSender<Progress>,
     stats: Arc<Stats>,
     resume: Arc<ResumeWriter>,
+    /// Published on every verified piece so a reader can await one without
+    /// polling. Sent while the picker lock is held, so it never goes backwards.
+    have: watch::Sender<Bitfield>,
 }
 
 impl Shared {
@@ -244,6 +273,10 @@ impl Shared {
                 return Ok(true);
             }
             picker.complete(index);
+            // Published under the lock: two workers finishing at once would
+            // otherwise be free to publish their snapshots out of order, and a
+            // reader awaiting a piece would see it appear and then vanish.
+            let _ = self.have.send(picker.have().clone());
             (picker.completed(), picker.piece_count())
         };
         // fetch_max, not store: two workers finishing out of order would
@@ -274,6 +307,108 @@ impl Shared {
     }
 }
 
+/// A live view of a running download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionStats {
+    pub pieces_have: usize,
+    pub pieces_total: usize,
+    pub bytes_downloaded: u64,
+    pub peers_connected: usize,
+    pub failed_hashes: u64,
+}
+
+impl SessionStats {
+    pub fn is_complete(&self) -> bool {
+        self.pieces_have >= self.pieces_total
+    }
+}
+
+/// A running download you can question and steer.
+///
+/// This is what turns the engine into something a media player can sit on top
+/// of: ask for the bytes you need next with [`SessionHandle::prioritise`], wait
+/// for them with [`SessionHandle::wait_for_piece`], then read them with
+/// [`SessionHandle::read_range`]. Cheap to clone, one per request handler.
+#[derive(Clone)]
+pub struct SessionHandle {
+    meta: Metainfo,
+    storage: Arc<Storage>,
+    picker: Arc<Mutex<Picker>>,
+    stats: Arc<Stats>,
+    have: watch::Receiver<Bitfield>,
+}
+
+impl SessionHandle {
+    pub fn meta(&self) -> &Metainfo {
+        &self.meta
+    }
+
+    /// A snapshot of the pieces verified so far.
+    pub fn have(&self) -> Bitfield {
+        self.have.borrow().clone()
+    }
+
+    pub fn has_piece(&self, index: usize) -> bool {
+        self.have.borrow().has(index)
+    }
+
+    /// Wait until `index` is on disk and verified.
+    ///
+    /// Returns false when the session ended without it, which is the caller's
+    /// cue to give up: the bytes on disk for that piece are still zeros, and
+    /// serving them would be quietly handing out corruption.
+    pub async fn wait_for_piece(&self, index: usize) -> bool {
+        let mut have = self.have.clone();
+        loop {
+            if have.borrow_and_update().has(index) {
+                return true;
+            }
+            if have.changed().await.is_err() {
+                // Every sender is gone, so no further piece will ever land.
+                return false;
+            }
+        }
+    }
+
+    /// Nominate the piece spans a reader needs soonest, most urgent first.
+    ///
+    /// Only has an effect under [`Strategy::Streaming`]. Replaces the previous
+    /// nomination outright, because a seek makes the old one worthless.
+    pub async fn prioritise(&self, spans: Vec<Range<usize>>) {
+        self.picker.lock().await.set_priority(spans);
+    }
+
+    /// Read a byte span of the concatenated piece space.
+    ///
+    /// Only ask for spans whose pieces have landed. Files are sparse until
+    /// written, so a premature read succeeds and returns zeros.
+    pub async fn read_range(&self, start: u64, len: u64) -> Result<Vec<u8>> {
+        self.storage.read_range(start, len).await
+    }
+
+    pub fn stats(&self) -> SessionStats {
+        let have = self.have.borrow();
+        SessionStats {
+            pieces_have: have.count_set(),
+            pieces_total: have.len(),
+            bytes_downloaded: self.stats.downloaded.load(Ordering::Relaxed),
+            peers_connected: self.stats.connected.load(Ordering::Relaxed) as usize,
+            failed_hashes: self.stats.failed_hashes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A started session, before anyone has begun draining its progress.
+struct Running {
+    handle: SessionHandle,
+    tasks: Vec<JoinHandle<()>>,
+    progress: mpsc::UnboundedReceiver<Progress>,
+    stats: Arc<Stats>,
+    resume: Arc<ResumeWriter>,
+    root: PathBuf,
+    piece_count: usize,
+}
+
 /// Download a torrent into `root`, using both peers and webseeds.
 ///
 /// `on_progress` is called from the caller's task, so it may do terminal I/O
@@ -283,13 +418,45 @@ pub async fn download<F>(
     root: impl AsRef<Path>,
     peers: Vec<std::net::SocketAddr>,
     config: &DownloadConfig,
-    mut on_progress: F,
+    on_progress: F,
 ) -> Result<DownloadSummary>
 where
     F: FnMut(Progress),
 {
+    let running = start(meta, root, peers, config).await?;
+    finish(running, on_progress).await
+}
+
+/// Start a download and hand back a handle, leaving it running in the
+/// background.
+///
+/// The returned [`JoinHandle`] resolves to the same summary [`download`] would
+/// have produced. Dropping it does not stop the download; abort it to do that.
+/// Set `config.strategy` to [`Strategy::Streaming`] if a reader is going to be
+/// waiting on specific bytes.
+pub async fn spawn(
+    meta: &Metainfo,
+    root: impl AsRef<Path>,
+    peers: Vec<std::net::SocketAddr>,
+    config: &DownloadConfig,
+) -> Result<(SessionHandle, JoinHandle<Result<DownloadSummary>>)> {
+    let running = start(meta, root, peers, config).await?;
+    let handle = running.handle.clone();
+    // Progress still has to be drained or the channel grows without bound.
+    let task = tokio::spawn(async move { finish(running, |_| {}).await });
+    Ok((handle, task))
+}
+
+/// Everything both entry points do: work out what is on disk, then set the
+/// workers going.
+async fn start(
+    meta: &Metainfo,
+    root: impl AsRef<Path>,
+    peers: Vec<std::net::SocketAddr>,
+    config: &DownloadConfig,
+) -> Result<Running> {
     let storage = Storage::create(root.as_ref(), meta).await?;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
 
     // Work out what we already have. A cleanly-saved resume file makes this
     // instant; anything else means re-reading and re-hashing the lot.
@@ -336,14 +503,29 @@ where
     // the next flush, the unclean flag sends the next run back to re-hashing.
     resume.flush(false).await;
 
+    let mut picker = Picker::with_have(existing.clone());
+    picker.set_strategy(config.strategy);
+    let picker = Arc::new(Mutex::new(picker));
+    let storage = Arc::new(storage);
+    let (have_tx, have_rx) = watch::channel(existing);
+
     let shared = Arc::new(Shared {
         meta: meta.clone(),
-        storage,
-        picker: Mutex::new(Picker::with_have(existing)),
+        storage: Arc::clone(&storage),
+        picker: Arc::clone(&picker),
         progress: tx.clone(),
         stats: Arc::clone(&stats),
         resume: Arc::clone(&resume),
+        have: have_tx,
     });
+
+    let handle = SessionHandle {
+        meta: meta.clone(),
+        storage,
+        picker,
+        stats: Arc::clone(&stats),
+        have: have_rx,
+    };
 
     let mut tasks = Vec::new();
 
@@ -378,12 +560,43 @@ where
         }
     }
 
-    // Drain progress until every worker is done. The channel only closes once
-    // the last sender is gone, so we must drop ours *and* our `Shared`, which
-    // holds one of its own.
+    // The workers hold their own senders through `Shared`; ours and the one
+    // inside our `Shared` would keep the channel open for ever, and the drain
+    // in `finish` would never end.
     drop(tx);
     drop(shared);
-    while let Some(update) = rx.recv().await {
+
+    Ok(Running {
+        handle,
+        tasks,
+        progress: rx,
+        stats,
+        resume,
+        root,
+        piece_count: meta.piece_count(),
+    })
+}
+
+/// Drain progress until every worker has stopped, then settle up.
+async fn finish<F>(running: Running, mut on_progress: F) -> Result<DownloadSummary>
+where
+    F: FnMut(Progress),
+{
+    let Running {
+        handle,
+        tasks,
+        mut progress,
+        stats,
+        resume,
+        root,
+        piece_count,
+    } = running;
+    // The handle holds a watch receiver, not a progress sender, so it cannot
+    // wedge the drain. Dropping it early would still be wrong: `spawn` gave a
+    // clone to the caller, and a live receiver is what lets them keep reading.
+    drop(handle);
+
+    while let Some(update) = progress.recv().await {
         on_progress(update);
     }
     for task in tasks {
@@ -404,11 +617,10 @@ where
     };
     on_progress(Progress::Done { bytes });
 
-    if summary.pieces < meta.piece_count() {
+    if summary.pieces < piece_count {
         return Err(Error::Peer(format!(
-            "stopped with {}/{} pieces; no source could supply the rest",
+            "stopped with {}/{piece_count} pieces; no source could supply the rest",
             summary.pieces,
-            meta.piece_count()
         )));
     }
     Ok(summary)
@@ -430,6 +642,9 @@ async fn run_peer(
     )
     .await?;
     peer.set_piece_count(shared.meta.piece_count())?;
+    // Counted from here rather than from `connect`, so the live figure means
+    // "peers actually trading with us" rather than "sockets we opened".
+    let _counted = PeerCount::new(&shared.stats);
     let _ = shared.progress.send(Progress::PeerConnected {
         addr: addr.to_string(),
         client: peer.client_name().map(str::to_string),

@@ -85,7 +85,7 @@ impl Storage {
         for slice in self.meta.piece_slices(index) {
             let mut file = self.open(slice.file_index).await?;
             file.seek(SeekFrom::Start(slice.file_offset)).await?;
-            let from = slice.piece_offset as usize;
+            let from = slice.offset_in_span as usize;
             let to = from + slice.length as usize;
             file.write_all(&data[from..to]).await?;
             file.flush().await?;
@@ -104,7 +104,31 @@ impl Storage {
         for slice in self.meta.piece_slices(index) {
             let mut file = self.open(slice.file_index).await?;
             file.seek(SeekFrom::Start(slice.file_offset)).await?;
-            let from = slice.piece_offset as usize;
+            let from = slice.offset_in_span as usize;
+            let to = from + slice.length as usize;
+            file.read_exact(&mut out[from..to]).await?;
+        }
+        Ok(out)
+    }
+
+    /// Read an arbitrary byte span of the concatenated piece space.
+    ///
+    /// The span is clamped to the torrent, so the returned buffer may be
+    /// shorter than `len` at the tail. Callers serving HTTP ranges should use
+    /// its actual length rather than assuming they got what they asked for.
+    ///
+    /// This reads whatever is on disk: files are created at full length and
+    /// filled sparsely, so asking for a span whose pieces have not arrived
+    /// yields zeros rather than an error. Only ask for verified pieces.
+    pub async fn read_range(&self, start: u64, len: u64) -> Result<Vec<u8>> {
+        let slices = self.meta.byte_slices(start, len);
+        let total: u64 = slices.iter().map(|slice| slice.length).sum();
+        let mut out = vec![0u8; total as usize];
+
+        for slice in slices {
+            let mut file = self.open(slice.file_index).await?;
+            file.seek(SeekFrom::Start(slice.file_offset)).await?;
+            let from = slice.offset_in_span as usize;
             let to = from + slice.length as usize;
             file.read_exact(&mut out[from..to]).await?;
         }
@@ -311,6 +335,41 @@ mod tests {
             "unwritten pieces are zeros, which will not hash"
         );
         assert_eq!(progress, meta.piece_count());
+    }
+
+    #[tokio::test]
+    async fn read_range_stitches_across_a_file_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = content();
+        let meta = multi_file(&content);
+        let storage = Storage::create(dir.path(), &meta).await.unwrap();
+
+        for index in 0..meta.piece_count() {
+            let start = index * meta.piece_length as usize;
+            let end = (start + meta.piece_length as usize).min(content.len());
+            storage.write_piece(index, &content[start..end]).await.unwrap();
+        }
+
+        // Wholly inside the second file, which begins at 600.
+        assert_eq!(storage.read_range(700, 50).await.unwrap(), &content[700..750]);
+        // Across the boundary, which is the case worth having a test for.
+        assert_eq!(storage.read_range(580, 40).await.unwrap(), &content[580..620]);
+        // And the whole thing, spanning both files and every piece.
+        assert_eq!(storage.read_range(0, 1000).await.unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn read_range_clamps_at_the_end_rather_than_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = content();
+        let meta = multi_file(&content);
+        let storage = Storage::create(dir.path(), &meta).await.unwrap();
+        storage.write_piece(1, &content[512..1000]).await.unwrap();
+
+        // A player probing with `Range: bytes=950-` asks for more than exists.
+        let tail = storage.read_range(950, 10_000).await.unwrap();
+        assert_eq!(tail, &content[950..1000], "short read, not an error");
+        assert!(storage.read_range(1000, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -36,14 +36,16 @@ impl TorrentFile {
     }
 }
 
-/// A slice of one piece that lives in one file.
+/// A slice of some byte span that lives in one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSlice {
     pub file_index: usize,
     /// Offset within that file.
     pub file_offset: u64,
-    /// Offset within the piece.
-    pub piece_offset: u64,
+    /// Offset within the span that was asked for, which is a piece when the
+    /// slices came from [`Metainfo::piece_slices`] and an arbitrary byte range
+    /// when they came from [`Metainfo::byte_slices`].
+    pub offset_in_span: u64,
     pub length: u64,
 }
 
@@ -216,11 +218,20 @@ impl Metainfo {
     /// number of file boundaries, which is the classic off-by-one in this
     /// protocol.
     pub fn piece_slices(&self, index: usize) -> Vec<FileSlice> {
-        let Some(size) = self.piece_size(index) else {
-            return Vec::new();
-        };
-        let start = index as u64 * self.piece_length;
-        let end = start + size;
+        match self.piece_size(index) {
+            Some(size) => self.byte_slices(index as u64 * self.piece_length, size),
+            None => Vec::new(),
+        }
+    }
+
+    /// The same mapping for an arbitrary byte span of the concatenated piece
+    /// space, which is what serving an HTTP range request needs.
+    ///
+    /// The span is clamped to the torrent, so a reader asking for more than
+    /// there is gets what exists rather than an error.
+    pub fn byte_slices(&self, start: u64, len: u64) -> Vec<FileSlice> {
+        let start = start.min(self.total_length);
+        let end = start.saturating_add(len).min(self.total_length);
 
         let mut slices = Vec::new();
         for (file_index, file) in self.files.iter().enumerate() {
@@ -232,11 +243,26 @@ impl Metainfo {
             slices.push(FileSlice {
                 file_index,
                 file_offset: from - file.offset,
-                piece_offset: from - start,
+                offset_in_span: from - start,
                 length: to - from,
             });
         }
         slices
+    }
+
+    /// The pieces covering a byte span, as a half-open range of indices.
+    ///
+    /// Empty when the span is empty. This is the bridge between "the browser
+    /// asked for bytes 40 MB to 44 MB" and "fetch pieces 312 through 344".
+    pub fn pieces_for_span(&self, start: u64, len: u64) -> std::ops::Range<usize> {
+        if len == 0 || start >= self.total_length {
+            return 0..0;
+        }
+        let end = start.saturating_add(len).min(self.total_length);
+        let first = (start / self.piece_length) as usize;
+        // `end` is exclusive, so the last byte we want is `end - 1`.
+        let last = ((end - 1) / self.piece_length) as usize;
+        first..(last + 1).min(self.piece_count())
     }
 
     /// A magnet link carrying everything a client needs to find this swarm.
@@ -566,7 +592,7 @@ mod tests {
             vec![FileSlice {
                 file_index: 0,
                 file_offset: 0,
-                piece_offset: 0,
+                offset_in_span: 0,
                 length: 512
             }]
         );
@@ -577,18 +603,82 @@ mod tests {
                 FileSlice {
                     file_index: 0,
                     file_offset: 512,
-                    piece_offset: 0,
+                    offset_in_span: 0,
                     length: 88
                 },
                 FileSlice {
                     file_index: 1,
                     file_offset: 0,
-                    piece_offset: 88,
+                    offset_in_span: 88,
                     length: 400
                 },
             ]
         );
         assert!(meta.piece_slices(2).is_empty());
+    }
+
+    #[test]
+    fn maps_an_arbitrary_byte_span_across_file_boundaries() {
+        let meta = Metainfo::parse(&multi_file_torrent()).unwrap();
+
+        // A span sitting entirely inside the second file, which starts at 600.
+        assert_eq!(
+            meta.byte_slices(700, 50),
+            vec![FileSlice {
+                file_index: 1,
+                file_offset: 100,
+                offset_in_span: 0,
+                length: 50
+            }]
+        );
+        // And one crossing the boundary, which is where this goes wrong.
+        assert_eq!(
+            meta.byte_slices(580, 40),
+            vec![
+                FileSlice {
+                    file_index: 0,
+                    file_offset: 580,
+                    offset_in_span: 0,
+                    length: 20
+                },
+                FileSlice {
+                    file_index: 1,
+                    file_offset: 0,
+                    offset_in_span: 20,
+                    length: 20
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn byte_spans_are_clamped_rather_than_refused() {
+        let meta = Metainfo::parse(&multi_file_torrent()).unwrap();
+
+        // Asking past the end yields what exists. A player probing with
+        // `Range: bytes=0-` asks for far more than the file holds.
+        let slices = meta.byte_slices(900, 10_000);
+        assert_eq!(slices.iter().map(|s| s.length).sum::<u64>(), 100);
+        assert!(meta.byte_slices(1000, 10).is_empty());
+        assert!(meta.byte_slices(0, 0).is_empty());
+    }
+
+    #[test]
+    fn spans_map_to_the_pieces_that_cover_them() {
+        let meta = Metainfo::parse(&multi_file_torrent()).unwrap();
+        assert_eq!(meta.piece_length, 512);
+
+        assert_eq!(meta.pieces_for_span(0, 1), 0..1);
+        // A span ending exactly on the boundary must not claim the next piece.
+        assert_eq!(meta.pieces_for_span(0, 512), 0..1);
+        assert_eq!(meta.pieces_for_span(0, 513), 0..2);
+        assert_eq!(meta.pieces_for_span(511, 2), 0..2);
+        assert_eq!(meta.pieces_for_span(512, 10), 1..2);
+        // Past the end, and empty spans, produce nothing to fetch.
+        assert!(meta.pieces_for_span(0, 0).is_empty());
+        assert!(meta.pieces_for_span(1000, 10).is_empty());
+        // Overlong spans stop at the last real piece.
+        assert_eq!(meta.pieces_for_span(0, u64::MAX), 0..2);
     }
 
     #[test]
