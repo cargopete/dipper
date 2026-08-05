@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a green badge can be re-established by hand after an infrastructure
+  # wobble, without pushing an empty commit.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace costs nothing here and turns "assertion failed" into something
+  # you can act on without reproducing it locally.
+  RUST_BACKTRACE: 1
+
+concurrency:
+  # A second push to the same branch makes the first run irrelevant.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: format and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # Warnings are denied rather than printed: a warning nobody fails on is a
+      # warning nobody reads.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One platform failing should not hide the result on the other.
+      fail-fast: false
+      matrix:
+        include:
+          # Linux carries ffmpeg, so the transcoding tests actually run here.
+          - os: ubuntu-latest
+            ffmpeg: true
+          # macOS is where this is developed, and it is worth knowing the rest
+          # still passes there. ffmpeg is left out on purpose: Homebrew takes
+          # several minutes to build it, and the transcode tests skip
+          # themselves when it is absent, which is exactly the behaviour a user
+          # without ffmpeg gets.
+          - os: macos-latest
+            ffmpeg: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ffmpeg
+        if: matrix.ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Report what is available
+        run: |
+          rustc --version
+          ffmpeg -version 2>/dev/null | head -1 || echo "ffmpeg: absent (transcode tests will skip)"
+
+      # --locked so a stale Cargo.lock is a failure rather than a silent
+      # dependency bump. The suite is entirely offline: the tests that touch
+      # archive.org are marked ignored and are not run here.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # A single job to require in branch protection, so the required check does
+  # not have to be renamed every time the matrix changes.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    if: always()
+    steps:
+      - name: Verify everything passed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "a required job did not pass"
+            exit 1
+          fi
+          echo "all green"

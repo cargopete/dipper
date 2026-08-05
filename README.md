@@ -1,5 +1,7 @@
 # dipper
 
+[![CI](https://github.com/cargopete/dipper/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/dipper/actions/workflows/ci.yml)
+
 A single-binary BitTorrent client that will also search the Internet Archive
 for you. Named after the white-throated dipper, a small brown bird that walks
 into rivers and comes back out with things.
