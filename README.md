@@ -14,6 +14,46 @@ the CLI it knows only a 20-byte infohash and has no idea where you got it.
 cargo install --path crates/dipper-cli
 ```
 
+## Watch things in a browser
+
+```sh
+dipper serve
+```
+
+Opens a local player at `http://127.0.0.1:8080`. Paste a magnet, an infohash,
+or an archive.org identifier, and the largest playable video starts within
+seconds rather than after the download finishes.
+
+That third option matters more than it looks. archive.org's trackers reject
+third-party seeding, so its swarms have no peers to ask for a file list, and a
+magnet alone cannot resolve. dipper fetches the derived `.torrent` over HTTPS
+instead, which is what makes the Archive's public domain film collections
+usable here at all.
+
+The trick is that the browser's `Range` requests drive which pieces the engine
+fetches next. That matters more than it sounds: plenty of MP4s keep their
+`moov` index box at the *end* of the file, so a player's first request is for
+the tail. A front-to-back sequential picker never serves it and playback hangs
+forever. Letting the requests steer the picker handles both layouts, and makes
+seeking work for nothing.
+
+Browsers only open some containers, so `.mp4`, `.m4v`, `.webm` and the common
+audio formats stream. Matroska and AVI are listed with an explanation and a
+download link rather than a player that silently fails, since remuxing them
+would mean shipping ffmpeg.
+
+Streaming *is* downloading: every piece is SHA-1 verified and written to disk,
+so anything you watch is also saved. Torrents live in the user cache directory
+and are swept once nobody has watched them for fifteen minutes. Tick **Keep
+offline** to stop that and fetch the whole thing.
+
+Serving flags: `--port`, `--host`, `-o <dir>`, `--low-bandwidth`.
+
+`--low-bandwidth` is worth knowing about. dipper normally keeps a quarter of a
+megabyte of requests outstanding per peer, which across thirty peers is a lot
+of other people's blocks queued in front of the piece your player is stalled
+on. The flag winds both figures down: less peak throughput, much shorter queue.
+
 ## Search and fetch in one go
 
 ```sh
@@ -96,6 +136,11 @@ requests, default 350), `--polite`, `-v`. Set `IA_ACCESS_KEY` and
 | 52 | BitTorrent v2 | no (v2-only magnets are refused with an explanation) |
 
 Piece selection is random-first then rarest-first, with an endgame at the tail.
+Streaming swaps that for a priority list driven by the player: what the browser
+asked for, then a readahead scaled to the measured download rate, then the tail
+of the file, then the rest of that file. The rest of the torrent comes last, and
+only for torrents you asked to keep, so a 900 MB extras track cannot compete
+with the film you are watching.
 Every piece is SHA-1 verified before it is written, whether it came from a peer
 or a webseed. Uploading is not implemented: dipper leeches, and says so.
 
@@ -124,6 +169,7 @@ feeds it a lying peer.
 | `dipper-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
 | `dipper-ia` | archive.org client: metadata API, search |
 | `dipper-index` | local tantivy catalogue over harvested metadata |
+| `dipper-web` | the local player: range-driven streaming over axum, page embedded in the binary |
 | `dipper-cli` | the `dipper` binary |
 
 ## Tests

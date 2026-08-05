@@ -13,6 +13,7 @@ rust-version = "1.85"
 dipper-bt = { path = "crates/dipper-bt", version = "0.1.0" }
 dipper-ia = { path = "crates/dipper-ia", version = "0.1.0" }
 dipper-index = { path = "crates/dipper-index", version = "0.1.0" }
+dipper-web = { path = "crates/dipper-web", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"

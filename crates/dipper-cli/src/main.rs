@@ -173,6 +173,52 @@ enum Command {
         engine: EngineArgs,
     },
 
+    /// Serve a local web player: paste a magnet, watch while it downloads.
+    ///
+    /// Engine flags are spelled out here rather than shared with the other
+    /// commands, so that `--port` can mean the web server, which is the one a
+    /// user of this command actually cares about.
+    Serve {
+        /// Port for the web player.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+
+        /// Address to bind. Loopback by default, because this endpoint will
+        /// download whatever magnet it is handed.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
+
+        /// Where torrents are stored. Defaults to the user cache directory.
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+
+        /// Fewer peers and a shallower request pipeline, for a slow or flaky
+        /// connection. Costs peak speed, shortens the queue in front of the
+        /// piece the player is waiting on.
+        #[arg(long)]
+        low_bandwidth: bool,
+
+        /// The port we tell peers and trackers we listen on.
+        #[arg(long, default_value_t = 6881)]
+        peer_port: u16,
+
+        /// Do not use the DHT. Trackers and webseeds only.
+        #[arg(long)]
+        no_dht: bool,
+
+        /// Ignore HTTP webseeds, even when the torrent has them.
+        #[arg(long)]
+        no_webseeds: bool,
+
+        /// How many peers to talk to at once.
+        #[arg(long, default_value_t = 30)]
+        max_peers: usize,
+
+        /// Seconds to spend looking for peers in the DHT.
+        #[arg(long, default_value_t = 20)]
+        dht_seconds: u64,
+    },
+
     /// Inspect or clear the local catalogue.
     Index {
         #[command(subcommand)]
@@ -431,6 +477,36 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let source = torrent_source::resolve(target, &client(&cli)?).await?;
             download::download_command(&source, output.clone(), &engine.into()).await
+        }
+
+        Command::Serve {
+            port,
+            host,
+            output,
+            low_bandwidth,
+            peer_port,
+            no_dht,
+            no_webseeds,
+            max_peers,
+            dht_seconds,
+        } => {
+            let mut config = dipper_web::ServeConfig {
+                host: *host,
+                port: *port,
+                data_dir: output.clone().unwrap_or_else(dipper_web::default_data_dir),
+                max_peers: *max_peers,
+                use_dht: !*no_dht,
+                use_webseeds: !*no_webseeds,
+                peer_port: *peer_port,
+                dht_budget: Duration::from_secs(*dht_seconds),
+                ..Default::default()
+            };
+            // Applied after the explicit flags so it wins: someone passing
+            // --low-bandwidth has said what they want louder than a default.
+            if *low_bandwidth {
+                config = config.thin_pipe();
+            }
+            dipper_web::serve(config).await
         }
 
         Command::Index { action } => {

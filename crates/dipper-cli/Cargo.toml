@@ -15,6 +15,7 @@ path = "src/main.rs"
 dipper-bt.workspace = true
 dipper-ia.workspace = true
 dipper-index.workspace = true
+dipper-web.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true
