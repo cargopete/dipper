@@ -483,7 +483,7 @@ video[hidden] { display: none; }
 
 #library-list li {
   display: grid;
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto;
   align-items: center;
   gap: 1rem;
   padding: 0.65rem 0;

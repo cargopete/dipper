@@ -312,7 +312,13 @@ impl Shared {
 pub struct SessionStats {
     pub pieces_have: usize,
     pub pieces_total: usize,
+    /// Bytes fetched during this run. Zero for a torrent that was already
+    /// complete when it started, which is why it must not be shown as
+    /// progress.
     pub bytes_downloaded: u64,
+    /// Bytes actually held, verified and on disk, including anything a
+    /// previous run left behind. This is the number a progress display wants.
+    pub bytes_on_disk: u64,
     pub peers_connected: usize,
     pub failed_hashes: u64,
 }
@@ -388,10 +394,19 @@ impl SessionHandle {
 
     pub fn stats(&self) -> SessionStats {
         let have = self.have.borrow();
+        // Summed rather than multiplied out: held pieces are scattered and the
+        // last one is nearly always short, so `count * piece_length` overstates
+        // and can exceed the torrent's own size.
+        let bytes_on_disk = (0..have.len())
+            .filter(|index| have.has(*index))
+            .filter_map(|index| self.meta.piece_size(index))
+            .sum();
+
         SessionStats {
             pieces_have: have.count_set(),
             pieces_total: have.len(),
             bytes_downloaded: self.stats.downloaded.load(Ordering::Relaxed),
+            bytes_on_disk,
             peers_connected: self.stats.connected.load(Ordering::Relaxed) as usize,
             failed_hashes: self.stats.failed_hashes.load(Ordering::Relaxed),
         }

@@ -171,7 +171,12 @@ pub struct Stats {
     pub name: String,
     pub pieces_have: usize,
     pub pieces_total: usize,
+    /// Fetched during this run only. Kept for the live rate readout.
     pub bytes_downloaded: u64,
+    /// Verified and held, including whatever an earlier run left. This is what
+    /// progress should be measured against: a resumed torrent has downloaded
+    /// almost nothing this session while holding nearly all of the file.
+    pub bytes_on_disk: u64,
     pub total_length: u64,
     pub peers: usize,
     pub rate: f64,
@@ -215,6 +220,7 @@ fn stats_for(hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats {
         pieces_have: snapshot.pieces_have,
         pieces_total: snapshot.pieces_total,
         bytes_downloaded: snapshot.bytes_downloaded,
+        bytes_on_disk: snapshot.bytes_on_disk,
         total_length: torrent.meta.total_length,
         peers: snapshot.peers_connected,
         rate: torrent.rate(),

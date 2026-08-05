@@ -528,7 +528,10 @@ function renderStats(stats) {
   el.peers.textContent = stats.peers;
   el.rate.textContent = `${bytes(Math.round(stats.rate))}/s`;
   el.pieces.textContent = `${stats.pieces_have} / ${stats.pieces_total}`;
-  el.disk.textContent = bytes(stats.bytes_downloaded);
+  // What is held, not what arrived this session. A resumed torrent has fetched
+  // almost nothing while holding nearly all of the file, and showing the
+  // latter as progress reads as "100% of 588 MiB, but only 9.8 MiB".
+  el.disk.textContent = bytes(stats.bytes_on_disk);
 
   const ahead = bufferedAhead();
   el.buffer.textContent = seconds(ahead);
@@ -566,11 +569,22 @@ function renderLibrary(all) {
     const percent = item.pieces_total
       ? Math.floor((item.pieces_have / item.pieces_total) * 100)
       : 0;
-    size.textContent = `${bytes(item.bytes_downloaded)} of ${bytes(item.total_length)} (${percent}%)`;
+    size.textContent = item.complete
+      ? bytes(item.total_length)
+      : `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
 
     const badge = document.createElement("span");
     badge.className = item.kept ? "badge badge-kept" : "badge";
     badge.textContent = item.kept ? "kept" : "temporary";
+
+    // Reopen something already on disk. Resolving by infohash finds the
+    // running session rather than starting a second one, so a part-finished
+    // torrent carries on downloading from where it stopped.
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "button-small";
+    open.textContent = item.complete ? "Watch" : "Resume";
+    open.addEventListener("click", () => openTorrent(item.infohash));
 
     const remove = document.createElement("button");
     remove.type = "button";
@@ -590,7 +604,7 @@ function renderLibrary(all) {
       refresh();
     });
 
-    row.append(name, size, badge, remove);
+    row.append(name, size, badge, open, remove);
     el.libraryList.append(row);
   }
 }
