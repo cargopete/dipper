@@ -719,8 +719,17 @@ function renderResults(data) {
 }
 
 /* Resolve anything the server understands: an identifier from a search
- * result, or whatever was pasted into the link box. */
+ * result, or whatever was pasted into the link box.
+ *
+ * Resolving a cold magnet can take half a minute, and a viewer who gets bored
+ * and clicks something else must not have the first request finish later and
+ * redraw the page underneath them. Each attempt takes a ticket, and only the
+ * newest one is allowed to touch the interface. */
+let opening = 0;
+
 async function openTorrent(what) {
+  const ticket = ++opening;
+
   show(el.failure, false);
   show(el.torrent, false);
   show(el.pending, true);
@@ -729,12 +738,17 @@ async function openTorrent(what) {
 
   try {
     const info = await api("/api/resolve", json({ magnet: what }));
+    if (ticket !== opening) return; // superseded; leave the page alone
     renderTorrent(info);
     refresh();
   } catch (err) {
-    show(el.pending, false);
+    if (ticket !== opening) return;
     show(el.failure, true);
     el.failureBody.textContent = err.message;
+  } finally {
+    // Whatever happened, the spinner goes. Hiding it only on the paths that
+    // completed is what left it stranded above a perfectly good player.
+    if (ticket === opening) show(el.pending, false);
   }
 }
 
