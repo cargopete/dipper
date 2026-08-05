@@ -221,6 +221,7 @@ async function startTranscode(info) {
 
   show(el.video, true);
   show(el.viewerNote, false);
+  show(el.pending, false);
   el.video.src = url;
 
   await once(source, "sourceopen");
@@ -325,6 +326,38 @@ async function pump() {
  * you wait for the whole shortfall, which is what the arithmetic below works
  * out and says out loud. */
 
+/* The rate has to be averaged over a decent window before it can be used for
+ * this. The live figure is smoothed over about a second, which is right for a
+ * speedometer and hopeless for a prediction: the formula divides by the rate,
+ * so a brief dip sends the estimate to hours, and a brief spike above the
+ * bitrate makes the whole notice vanish and come back. */
+
+const RATE_WINDOW_MS = 30_000;
+const MIN_SAMPLE_MS = 12_000;
+let rateSamples = [];
+let lastVerdictOk = null; // for hysteresis, so the verdict cannot flap
+
+function recordRate(stats) {
+  const now = performance.now();
+  rateSamples.push({ at: now, bytes: stats.bytes_on_disk });
+  rateSamples = rateSamples.filter((sample) => now - sample.at <= RATE_WINDOW_MS);
+}
+
+function forgetRates() {
+  rateSamples = [];
+  lastVerdictOk = null;
+}
+
+/** Bytes per second averaged over the window, or null if too soon to say. */
+function averageRate() {
+  if (rateSamples.length < 2) return null;
+  const first = rateSamples[0];
+  const last = rateSamples[rateSamples.length - 1];
+  const span = last.at - first.at;
+  if (span < MIN_SAMPLE_MS) return null;
+  return Math.max(0, (last.bytes - first.bytes) / (span / 1000));
+}
+
 function feasibility() {
   if (!playInfo || !lastStats || playing === null) return null;
   if (lastStats.complete) return { ok: true };
@@ -335,14 +368,35 @@ function feasibility() {
   const duration = playInfo.duration || el.video.duration;
   if (!length || !duration || !isFinite(duration) || duration <= 0) return null;
 
+  const rate = averageRate();
+  if (rate === null) return null; // still measuring; say nothing rather than guess
+
   const bitrate = length / duration;
-  const rate = lastStats.rate;
-  if (rate >= bitrate) return { ok: true };
+  // A dead band around the bitrate, so a swarm hovering near the threshold
+  // does not switch the notice on and off every second.
+  let ok = lastVerdictOk;
+  if (rate >= bitrate * 1.05) ok = true;
+  else if (rate <= bitrate * 0.95) ok = false;
+  if (ok === null) ok = rate >= bitrate;
+  lastVerdictOk = ok;
+  if (ok) return { ok: true };
 
   // Start now and you run out at some point. To watch through uninterrupted
-  // the download must finish as playback does, which needs this head start.
+  // the download must finish exactly as playback does, which needs this head
+  // start. Note it also equals the time the stalls would have cost anyway.
   const wait = rate > 0 ? (duration * (bitrate - rate)) / rate : Infinity;
-  return { ok: false, bitrate, rate, wait, hopeless: rate < bitrate * 0.05 };
+  const total = rate > 0 ? length / rate : Infinity;
+  return { ok: false, bitrate, rate, wait, total, hopeless: rate < bitrate * 0.1 };
+}
+
+/** Rounded so a jittering estimate does not twitch every second. */
+function roughly(secs) {
+  if (!isFinite(secs)) return "a very long time";
+  if (secs < 90) return "under a minute";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `about ${Math.max(1, Math.round(mins / 5) * 5)} minutes`;
+  const hours = secs / 3600;
+  return hours < 1.5 ? "about an hour" : `about ${Math.round(hours)} hours`;
 }
 
 function showAdvisory() {
@@ -356,21 +410,32 @@ function showAdvisory() {
   const strong = document.createElement("strong");
   const rest = document.createElement("span");
 
+  const supply = `${bytes(Math.round(verdict.rate))}/s`;
+  const needed = `${bytes(Math.round(verdict.bitrate))}/s`;
+
   if (verdict.hopeless) {
     strong.textContent = "This cannot be watched live. ";
     rest.textContent =
-      `The swarm is supplying ${bytes(Math.round(verdict.rate))}/s and playback ` +
-      `needs ${bytes(Math.round(verdict.bitrate))}/s. Leave it downloading and ` +
-      "watch when it has finished, or tick Keep offline so it survives.";
+      `The swarm is supplying ${supply} and playback needs ${needed}. Leave it ` +
+      "downloading and watch when it has finished, or tick Keep offline so it survives.";
   } else {
     strong.textContent = "This will stall. ";
+    // Waiting and stalling cost the same total time, because nothing can be
+    // watched faster than it arrives. Saying so stops the wait reading as a
+    // penalty when it is really a choice about when the pauses happen.
     rest.textContent =
-      `The swarm is supplying ${bytes(Math.round(verdict.rate))}/s against the ` +
-      `${bytes(Math.round(verdict.bitrate))}/s playback needs. Waiting about ` +
-      `${seconds(verdict.wait)} would let it run through without interruption.`;
+      `The swarm supplies ${supply} against the ${needed} playback needs, so it ` +
+      `will pause now and then. Either way it takes ${roughly(verdict.total)} to ` +
+      `get through: start now and accept the interruptions, or wait ` +
+      `${roughly(verdict.wait)} for a head start and then run clean. More peers ` +
+      "would improve both.";
   }
 
-  el.advisory.append(strong, rest);
+  const text = strong.textContent + rest.textContent;
+  if (el.advisory.dataset.text !== text) {
+    el.advisory.dataset.text = text;
+    el.advisory.replaceChildren(strong, rest);
+  }
   show(el.advisory, true);
 }
 
@@ -478,7 +543,11 @@ async function play(index) {
   teardown();
   playing = index;
   playInfo = null;
+  forgetRates();
   show(el.advisory, false);
+  // The loading panel belongs to resolving, not to playing. Anything that
+  // puts a picture on the screen must clear it.
+  show(el.pending, false);
   renderFiles();
   teardown();
   el.video.removeAttribute("src");
@@ -507,6 +576,7 @@ async function play(index) {
   if (info.mode === "direct") {
     show(el.video, true);
     show(el.viewerNote, false);
+    show(el.pending, false);
     el.video.src = info.url;
     el.video.load();
     el.video.play().catch(() => {
@@ -624,6 +694,7 @@ function renderTorrent(info) {
 
 function renderStats(stats) {
   lastStats = stats;
+  recordRate(stats);
   showAdvisory();
   el.peers.textContent = stats.peers;
   el.rate.textContent = `${bytes(Math.round(stats.rate))}/s`;
