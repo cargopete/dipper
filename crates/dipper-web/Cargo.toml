@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 dipper-bt.workspace = true
 dipper-ia.workspace = true
+dipper-tpb.workspace = true
 
 anyhow.workspace = true
 serde.workspace = true

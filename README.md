@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/cargopete/dipper/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/dipper/actions/workflows/ci.yml)
 
-A single-binary BitTorrent client that will also search the Internet Archive
-for you. Named after the white-throated dipper, a small brown bird that walks
-into rivers and comes back out with things.
+A single-binary BitTorrent client that will also go and find something to watch.
+Named after the white-throated dipper, a small brown bird that walks into rivers
+and comes back out with things.
 
 The engine takes a magnet link, a `.torrent`, or an archive.org identifier and
 produces verified bytes on disk. It is deliberately provenance-agnostic: below
@@ -31,6 +31,26 @@ third-party seeding, so its swarms have no peers to ask for a file list, and a
 magnet alone cannot resolve. dipper fetches the derived `.torrent` over HTTPS
 instead, which is what makes the Archive's public domain film collections
 usable here at all.
+
+### Two indexes behind the one search bar
+
+The search bar asks either archive.org or apibay, the JSON endpoint behind
+thepiratebay's frontend. Both hand the resolver something it already accepts:
+the Archive gives an item identifier, apibay gives a magnet assembled locally
+from the infohash it returns. Neither the resolver nor the engine below it is
+told which happened, which is the same provenance-agnostic split the CLI has.
+
+apibay searches are restricted to video categories, and never to `cat=0`, which
+searches everything including the adult categories and will return them for an
+innocent query. Results with no seeders are dropped rather than offered, because
+a magnet nobody is seeding is not a slow download, it is one that never starts,
+and in the interface it is indistinguishable from one still looking for peers.
+The count of what was dropped is shown next to the results rather than quietly
+swallowed.
+
+What is on the other end is a public index of whatever strangers uploaded. Most
+of it is copyrighted, none of it is cleared, and the category is not a licence.
+dipper says so under the search box rather than in a comment nobody reads.
 
 The trick is that the browser's `Range` requests drive which pieces the engine
 fetches next. That matters more than it sounds: plenty of MP4s keep their
@@ -192,6 +212,7 @@ feeds it a lying peer.
 | --- | --- |
 | `dipper-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
 | `dipper-ia` | archive.org client: metadata API, search |
+| `dipper-tpb` | apibay client: search, and magnets built from the infohash |
 | `dipper-index` | local tantivy catalogue over harvested metadata |
 | `dipper-web` | the local player: range-driven streaming, on-demand transcoding, page embedded in the binary |
 | `dipper-cli` | the `dipper` binary |
@@ -220,6 +241,11 @@ the SHA-1 path.
 - archive.org's trackers reject third-party seeding, so its swarms are
   effectively webseed-only. `dipper download <identifier>` gets everything over
   HTTP and never sees a peer.
+- apibay never answers an empty search with `[]`. It returns a single row with
+  id `0` and a name of "No results returned", which parses perfectly and renders
+  as an entirely convincing fake result. It also has no browse: an empty query
+  gets the same sentinel, so dipper refuses one rather than reporting that
+  nothing matched.
 
 ## Licence
 

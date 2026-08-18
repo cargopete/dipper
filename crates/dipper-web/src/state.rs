@@ -158,6 +158,9 @@ pub struct AppState {
     /// Used only to turn an archive.org identifier into a torrent. Held here
     /// rather than built per request so its rate limiting actually applies.
     pub ia: dipper_ia::IaClient,
+    /// Used only for searching. Held here for the same reason as `ia`: a client
+    /// rebuilt per request paces itself against nothing.
+    pub tpb: dipper_tpb::TpbClient,
     /// ffmpeg, if this machine has it. `None` disables transcoding and the
     /// player falls back to offering downloads.
     pub tools: Option<crate::ffmpeg::Tools>,
@@ -182,6 +185,7 @@ impl AppState {
         Self {
             config,
             ia: dipper_ia::IaClient::new().expect("the HTTP client failed to build"),
+            tpb: dipper_tpb::TpbClient::new().expect("the HTTP client failed to build"),
             tools: None,
             self_base: Mutex::new(String::new()),
             transcodes: tokio::sync::Semaphore::new(MAX_TRANSCODES),

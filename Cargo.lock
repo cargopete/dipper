@@ -680,6 +680,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dipper-tpb"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "dipper-web"
 version = "0.1.0"
 dependencies = [
@@ -687,6 +700,7 @@ dependencies = [
  "axum",
  "dipper-bt",
  "dipper-ia",
+ "dipper-tpb",
  "directories",
  "futures-util",
  "reqwest",

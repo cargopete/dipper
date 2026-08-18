@@ -15,8 +15,11 @@ const el = {
   submit: $("intake-submit"),
   searchForm: $("search-form"),
   query: $("query"),
-  shelf: $("shelf"),
-  shelfNote: $("shelf-note"),
+  source: $("source"),
+  filter: $("filter"),
+  filterLabel: $("filter-label"),
+  filterNote: $("filter-note"),
+  sourceNote: $("source-note"),
   searchSubmit: $("search-submit"),
   results: $("results"),
   resultList: $("result-list"),
@@ -50,7 +53,7 @@ const el = {
 let current = null;   // the TorrentInfo we are showing
 let playing = null;   // index of the file in the player
 let poller = null;
-let shelves = [];
+let filters = [];     // the subsets offered by the selected index
 let lastStats = null; // the most recent poll, for the feasibility advisory
 let playInfo = null;  // what /api/play said about the file being played
 
@@ -811,7 +814,88 @@ function startPolling() {
   }, 1000);
 }
 
-/* ---- search ------------------------------------------------------------ */
+/* ---- search -------------------------------------------------------------
+ *
+ * Two indexes, described in one table rather than branched on in five places.
+ * Each entry says what to call its subsets, where to fetch them, how to spell a
+ * query, and how to turn one hit into a row. A third index would be a third
+ * entry.
+ *
+ * Both hand back something `/api/resolve` accepts: the Archive gives an item
+ * identifier the server turns into a torrent over HTTPS, apibay gives a magnet
+ * assembled from an infohash. Neither the resolver nor the engine below it is
+ * told which happened. */
+
+const SOURCES = {
+  ia: {
+    /* What this index calls its subsets. */
+    filterLabel: "Collection",
+    catalogue: "/api/shelves",
+    /* Both endpoints answer with a list of {key, label, note}; only the
+     * envelope differs, and this is where that stops mattering. */
+    options: (payload) => payload,
+    /* A standing caution about the index itself, shown under the form. The
+     * Archive's cautions belong to its individual collections, so it has none
+     * of its own. */
+    note: () => null,
+    /* An empty query browses the collection, which is genuinely useful here. */
+    allowsEmpty: true,
+    query: (terms) => `/api/search?${new URLSearchParams({
+      q: terms,
+      shelf: el.filter.value,
+      limit: "24",
+    })}`,
+    count: (data) => (data.hits.length ? `showing ${data.hits.length} of ${data.total}` : ""),
+    empty: "Nothing in this collection matches that. Try fewer words, or a different collection.",
+    row: (hit) => ({
+      title: hit.title,
+      meta: [hit.creator, hit.year, hit.identifier],
+      size: hit.size,
+      swarm: null,
+      open: hit.identifier,
+    }),
+  },
+
+  tpb: {
+    filterLabel: "Category",
+    catalogue: "/api/tpb/categories",
+    options: (payload) => payload.categories,
+    note: (payload) => payload.note,
+    /* apibay has no browse: an empty query returns its no-results sentinel,
+     * which would surface as "nothing matches that", which is not what
+     * happened. */
+    allowsEmpty: false,
+    query: (terms) => `/api/tpb/search?${new URLSearchParams({
+      q: terms,
+      category: el.filter.value,
+      limit: "24",
+    })}`,
+    count: (data) => {
+      if (!data.hits.length) return "";
+      const shown = `showing ${data.hits.length} of ${data.total}`;
+      /* Reported rather than hidden. Showing 24 of 24 when the search actually
+       * found 55 reads as though 24 was all there was. */
+      return data.unseeded ? `${shown}, ${data.unseeded} unseeded hidden` : shown;
+    },
+    empty: "Nothing in this category with anyone seeding it. Try fewer words, or a broader category.",
+    row: (hit) => ({
+      title: hit.name,
+      meta: [
+        hit.category_label,
+        hit.num_files > 1 ? `${hit.num_files} files` : null,
+        /* Epoch seconds from the server, formatted here, where the viewer's
+         * timezone is actually known. */
+        new Date(hit.added * 1000).toISOString().slice(0, 10),
+        hit.username,
+      ],
+      size: hit.size_bytes,
+      swarm: { seeders: hit.seeders, leechers: hit.leechers },
+      open: hit.magnet,
+    }),
+  },
+};
+
+const source = () => SOURCES[el.source.value] || SOURCES.ia;
 
 function setMode(mode) {
   for (const button of el.modes) {
@@ -822,73 +906,105 @@ function setMode(mode) {
   show(el.form, mode === "link");
 }
 
-async function loadShelves() {
+/* Fetch the subsets the selected index offers, and fill the menu.
+ *
+ * Takes a ticket for the same reason `openTorrent` does: changing the index
+ * twice in quick succession must not leave the first answer to arrive last and
+ * fill the menu with the other index's entries. */
+let loading = 0;
+
+async function loadFilters() {
+  const ticket = ++loading;
+  const chosen = source();
+
+  let payload;
   try {
-    shelves = await api("/api/shelves");
+    payload = await api(chosen.catalogue);
   } catch {
-    // Search is unusable without them, so say so rather than leaving an
-    // empty menu the user cannot explain.
-    el.shelfNote.textContent =
-      "Could not reach archive.org to load the collections. Paste a link instead.";
+    if (ticket !== loading) return;
+    /* Search is unusable without them, so say so rather than leaving an empty
+     * menu the user cannot explain. */
+    filters = [];
+    el.filter.replaceChildren();
+    el.filterNote.textContent =
+      "Could not reach that index to load its categories. Paste a link instead.";
+    show(el.sourceNote, false);
     return;
   }
+  if (ticket !== loading) return;
 
-  el.shelf.replaceChildren();
-  for (const shelf of shelves) {
-    const option = document.createElement("option");
-    option.value = shelf.key;
-    option.textContent = shelf.label;
-    el.shelf.append(option);
+  filters = chosen.options(payload) || [];
+  el.filterLabel.textContent = chosen.filterLabel;
+  el.filter.replaceChildren();
+  for (const option of filters) {
+    const node = document.createElement("option");
+    node.value = option.key;
+    node.textContent = option.label;
+    el.filter.append(node);
   }
-  showShelfNote();
+  showFilterNote();
+
+  const note = chosen.note(payload);
+  el.sourceNote.textContent = note || "";
+  show(el.sourceNote, Boolean(note));
 }
 
-function showShelfNote() {
-  const shelf = shelves.find((s) => s.key === el.shelf.value);
-  el.shelfNote.textContent = shelf ? shelf.note : "";
+function showFilterNote() {
+  const chosen = filters.find((option) => option.key === el.filter.value);
+  el.filterNote.textContent = chosen ? chosen.note : "";
 }
 
 function renderResults(data) {
+  const chosen = source();
   show(el.results, true);
   el.resultList.replaceChildren();
-
-  el.resultsCount.textContent = data.hits.length
-    ? `showing ${data.hits.length} of ${data.total}`
-    : "";
+  el.resultsCount.textContent = chosen.count(data);
 
   if (!data.hits.length) {
     const empty = document.createElement("li");
     empty.className = "hint";
-    empty.textContent =
-      "Nothing in this collection matches that. Try fewer words, or a different collection.";
+    empty.textContent = chosen.empty;
     el.resultList.append(empty);
     return;
   }
 
   for (const hit of data.hits) {
+    const view = chosen.row(hit);
     const row = document.createElement("li");
 
     const title = document.createElement("div");
     title.className = "result-title";
-    title.textContent = hit.title;
+    title.textContent = view.title;
     const meta = document.createElement("span");
     meta.className = "result-meta";
-    meta.textContent = [hit.creator, hit.year, hit.identifier]
-      .filter(Boolean)
-      .join("  /  ");
+    meta.textContent = view.meta.filter(Boolean).join("  /  ");
     title.append(meta);
+
+    /* Always appended, even when empty, so the grid columns line up between an
+     * index that reports a swarm and one that does not. */
+    const swarm = document.createElement("span");
+    swarm.className = "result-swarm";
+    if (view.swarm) {
+      const seeders = document.createElement("span");
+      /* Under about ten seeders a stream will probably not keep ahead of the
+       * playhead, and the viewer may as well know that before clicking. */
+      seeders.className = view.swarm.seeders < 10 ? "result-seeders-thin" : "result-seeders";
+      seeders.textContent = `${view.swarm.seeders}`;
+      swarm.append(seeders, ` / ${view.swarm.leechers}`);
+      swarm.title = `${view.swarm.seeders} seeding, ${view.swarm.leechers} leeching`;
+    }
 
     const size = document.createElement("span");
     size.className = "result-size";
-    size.textContent = hit.size ? bytes(hit.size) : "";
+    size.textContent = view.size ? bytes(view.size) : "";
 
     const action = document.createElement("button");
     action.type = "button";
     action.className = "button-small";
     action.textContent = "Watch";
-    action.addEventListener("click", () => openTorrent(hit.identifier));
+    action.addEventListener("click", () => openTorrent(view.open));
 
-    row.append(title, size, action);
+    row.append(title, swarm, size, action);
     el.resultList.append(row);
   }
 }
@@ -929,18 +1045,20 @@ async function openTorrent(what) {
 
 el.searchForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const chosen = source();
+  const terms = el.query.value.trim();
+  if (!terms && !chosen.allowsEmpty) {
+    el.query.focus();
+    return;
+  }
+
   el.searchSubmit.disabled = true;
   show(el.failure, false);
   el.resultsCount.textContent = "searching";
   show(el.results, true);
 
   try {
-    const params = new URLSearchParams({
-      q: el.query.value.trim(),
-      shelf: el.shelf.value,
-      limit: "24",
-    });
-    renderResults(await api(`/api/search?${params}`));
+    renderResults(await api(chosen.query(terms)));
   } catch (err) {
     show(el.results, false);
     show(el.failure, true);
@@ -950,7 +1068,17 @@ el.searchForm.addEventListener("submit", async (event) => {
   }
 });
 
-el.shelf.addEventListener("change", showShelfNote);
+el.filter.addEventListener("change", showFilterNote);
+
+/* Changing the index invalidates whatever is on screen: those results belong
+ * to the other one, and leaving them under a new menu is a fine way to click
+ * the wrong thing. */
+el.source.addEventListener("change", () => {
+  show(el.results, false);
+  el.resultList.replaceChildren();
+  el.resultsCount.textContent = "";
+  loadFilters();
+});
 
 for (const button of el.modes) {
   button.addEventListener("click", () => setMode(button.dataset.mode));
@@ -1006,5 +1134,5 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () 
 });
 
 setMode("search");
-loadShelves();
+loadFilters();
 startPolling();

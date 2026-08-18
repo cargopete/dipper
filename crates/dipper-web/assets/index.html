@@ -35,7 +35,7 @@
     <form id="search-form" role="tabpanel" aria-labelledby="mode-search" novalidate>
       <div class="search-row">
         <div class="field">
-          <label for="query">Search the Internet Archive</label>
+          <label for="query">Search for</label>
           <input
             id="query"
             name="query"
@@ -43,15 +43,25 @@
             spellcheck="false"
             autocomplete="off"
             placeholder="atomic, cartoons, noir, anything"
-            aria-describedby="shelf-note">
+            aria-describedby="filter-note source-note">
         </div>
         <div class="field field-narrow">
-          <label for="shelf">Collection</label>
-          <select id="shelf"></select>
+          <label for="source">Index</label>
+          <select id="source">
+            <option value="ia">Internet Archive</option>
+            <option value="tpb">apibay</option>
+          </select>
+        </div>
+        <div class="field field-narrow">
+          <!-- Relabelled with the source: one index has collections, the other
+               has categories, and calling both "filter" would help nobody. -->
+          <label for="filter" id="filter-label">Collection</label>
+          <select id="filter"></select>
         </div>
         <button type="submit" id="search-submit">Search</button>
       </div>
-      <p class="hint" id="shelf-note"></p>
+      <p class="hint" id="filter-note"></p>
+      <p class="hint hint-caution" id="source-note" hidden></p>
     </form>
 
     <form id="intake-form" role="tabpanel" aria-labelledby="mode-link" novalidate hidden>

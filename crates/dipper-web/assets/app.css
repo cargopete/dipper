@@ -227,7 +227,7 @@ button[disabled] { opacity: 0.5; cursor: progress; }
 
 .search-row {
   display: grid;
-  grid-template-columns: 1fr 14rem auto;
+  grid-template-columns: 1fr 11rem 13rem auto;
   align-items: end;
   gap: 0.75rem;
 }
@@ -247,6 +247,14 @@ button[disabled] { opacity: 0.5; cursor: progress; }
 .field input:focus, .field select:focus {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* A note that is a caution rather than an explanation. Marked by a rule in the
+ * margin instead of a colour alone, so it still reads as different in
+ * monochrome and to anyone who does not see the red. */
+.hint-caution {
+  border-left: 2px solid var(--bad);
+  padding-left: 0.7rem;
 }
 
 /* ---- search results ---------------------------------------------------- */
@@ -276,7 +284,7 @@ button[disabled] { opacity: 0.5; cursor: progress; }
 
 #result-list li {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   align-items: center;
   gap: 1rem;
   padding: 0.7rem 0;
@@ -297,6 +305,17 @@ button[disabled] { opacity: 0.5; cursor: progress; }
   font-size: 0.8rem;
   color: var(--ink-soft);
 }
+.result-swarm {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+/* Seeders are the number that decides whether this plays at all, so they get
+   the ink. Leechers are context. */
+.result-seeders { color: var(--good); }
+.result-seeders-thin { color: var(--bad); }
 
 /* ---- stage: viewer plus telemetry -------------------------------------- */
 

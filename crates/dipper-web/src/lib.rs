@@ -16,6 +16,7 @@ pub mod state;
 pub mod stream;
 pub mod subtitles;
 pub mod torrent;
+pub mod tpb;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -76,6 +77,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/subtitles/{hash}/{file}", get(play::sidecar))
         .route("/api/search", get(search::handler))
         .route("/api/shelves", get(search::shelves))
+        .route("/api/tpb/search", get(tpb::handler))
+        .route("/api/tpb/categories", get(tpb::categories))
         .route("/api/resolve", post(routes::resolve))
         .route("/api/torrents", get(routes::list))
         .route("/api/torrents/{hash}", get(routes::stats))
