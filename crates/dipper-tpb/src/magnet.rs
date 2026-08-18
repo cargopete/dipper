@@ -16,7 +16,11 @@ pub const TRACKERS: &[&str] = &[
     "udp://open.demonii.com:1337/announce",
     "udp://tracker.dler.org:6969/announce",
     "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.moeking.me:6969/announce",
+    // tracker.moeking.me used to be here and its domain no longer resolves, so
+    // it cost a DNS timeout per magnet and returned nothing. Checked by
+    // announcing to each of these directly rather than by trusting the list
+    // thepiratebay ships.
+    "udp://explodie.org:6969/announce",
 ];
 
 /// Assemble a magnet URI, or `None` if the hash is not one.
