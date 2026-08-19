@@ -19,8 +19,17 @@ use tokio::task::JoinHandle;
 
 use crate::state::{ServeConfig, Torrent};
 
-/// How many peers to try for the metadata before giving up.
+/// How many peers to ask for the metadata at once.
 const METADATA_PEERS: usize = 8;
+
+/// How long to keep trying for a file list before giving up on the swarm.
+///
+/// Discovery finishes in a few seconds and returns whatever it has; a magnet
+/// resolved from that one snapshot fails if those particular peers happen to be
+/// unreachable, which on a public swarm is most of them. The DHT keeps finding
+/// more for as long as it is asked, so the useful thing to do with a failure is
+/// look again rather than report it.
+const METADATA_PATIENCE: Duration = Duration::from_secs(90);
 
 /// How often to go back to the trackers for more peers.
 ///
@@ -158,20 +167,82 @@ pub async fn resolve(input: &Input, config: &ServeConfig) -> Result<(Metainfo, V
                      may be dead or your network may be blocking outbound BitTorrent"
                 );
             }
-            // What comes back is trustworthy solely because
-            // `from_verified_info_dict` hashes it against the infohash we asked
-            // for. A peer can otherwise choose our file layout for us.
-            let (meta, from) = peer::fetch_metadata_from_peers(
-                &peers,
-                magnet.info_hash,
-                generate_peer_id(),
-                config.peer_port,
-                METADATA_PEERS,
-            )
-            .await
-            .context("no peer would serve the torrent metadata")?;
-            tracing::debug!(from = %from, name = meta.name, "metadata recovered");
-            meta
+            /* Ask, and if nobody answers, go and find more peers rather than
+             * giving up on the swarm. The addresses a first sweep returns are
+             * mostly unreachable on a public swarm: fake, or behind a NAT that
+             * will not accept us. The one that will answer is frequently in the
+             * next batch the DHT turns up.
+             *
+             * What comes back is trustworthy solely because
+             * `from_verified_info_dict` hashes it against the infohash we asked
+             * for. A peer can otherwise choose our file layout for us. */
+            let started = std::time::Instant::now();
+            let mut asked = 0usize;
+            let mut last_error = None;
+            let mut candidates = peers.clone();
+
+            loop {
+                if !candidates.is_empty() {
+                    asked += candidates.len();
+                    match peer::fetch_metadata_from_peers(
+                        &candidates,
+                        magnet.info_hash,
+                        generate_peer_id(),
+                        config.peer_port,
+                        METADATA_PEERS,
+                    )
+                    .await
+                    {
+                        Ok((meta, from)) => {
+                            tracing::debug!(from = %from, name = meta.name, "metadata recovered");
+                            break meta;
+                        }
+                        Err(err) => last_error = Some(err),
+                    }
+                }
+
+                if started.elapsed() >= METADATA_PATIENCE {
+                    let err = last_error
+                        .map(|err| err.to_string())
+                        .unwrap_or_else(|| "no peers to ask".to_string());
+                    bail!(
+                        "no peer would serve the file list after {}s and {asked} peers: {err}. \
+                         The swarm may have seeders that will send data but none that will \
+                         answer a metadata request, which a different release of the same \
+                         thing usually will",
+                        started.elapsed().as_secs()
+                    );
+                }
+
+                // Look again. Only addresses we have not already tried are worth
+                // another connection.
+                let before: std::collections::HashSet<SocketAddr> =
+                    discovery.peers().into_iter().collect();
+                discovery
+                    .run(
+                        magnet,
+                        generate_peer_id(),
+                        0,
+                        dht.as_ref(),
+                        &DiscoveryConfig {
+                            tracker_timeout: config.tracker_timeout,
+                            dht_budget: config.dht_budget,
+                            use_dht: config.use_dht,
+                            port: config.peer_port,
+                        },
+                        |_, _| {},
+                    )
+                    .await;
+                candidates = discovery
+                    .peers()
+                    .into_iter()
+                    .filter(|addr| !before.contains(addr))
+                    .collect();
+                tracing::debug!(
+                    fresh = candidates.len(),
+                    "looking again for a peer with the file list"
+                );
+            }
         }
     };
 

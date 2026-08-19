@@ -23,6 +23,12 @@ export type Choice = {
   /** How many releases were considered, for saying so out loud. */
   considered: number;
   why: string;
+  /** The next best, in order, for when the first will not open.
+   *
+   * A swarm can have seeders that send data and none that will answer a request
+   * for the file list, and no amount of seeder count predicts it. The only cure
+   * is another release of the same thing, so they travel together. */
+  alternatives: Hit[];
 };
 
 /** A release nobody wants, whatever its seeder count. */
@@ -73,6 +79,7 @@ export function pick(
       overBudget: false,
       considered: candidates.length,
       why: `best seeded of ${fitting.length} that fit`,
+      alternatives: runnersUp(fitting, candidates, best.hit),
     };
   }
 
@@ -93,7 +100,35 @@ export function pick(
     overBudget: true,
     considered: candidates.length,
     why: "nothing fits a thin line; this is the smallest",
+    alternatives: runnersUp(candidates, candidates, smallest.hit),
   };
+}
+
+/**
+ * The next few worth trying, best first.
+ *
+ * Drawn from the ones that fitted where possible, then from everything else, so
+ * a fallback does not quietly become a 12GB remux on a thin line. Three, because
+ * a fourth attempt is slower than admitting defeat.
+ */
+function runnersUp(
+  preferred: { hit: Hit; bitrate: number }[],
+  all: { hit: Hit; bitrate: number }[],
+  chosen: Hit,
+): Hit[] {
+  const seen = new Set([chosen.magnet]);
+  const ordered = [
+    ...[...preferred].sort((a, b) => b.hit.seeders - a.hit.seeders),
+    ...[...all].sort((a, b) => a.bitrate - b.bitrate),
+  ];
+  const out: Hit[] = [];
+  for (const { hit } of ordered) {
+    if (seen.has(hit.magnet)) continue;
+    seen.add(hit.magnet);
+    out.push(hit);
+    if (out.length === 3) break;
+  }
+  return out;
 }
 
 /** Bytes per second as something a person reads. */

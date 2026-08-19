@@ -27,6 +27,7 @@ type Episode = {
 
 type Pick = {
   magnet: string;
+  alternatives: string[];
   name: string;
   sizeBytes: number;
   seeders: number;
@@ -78,14 +79,15 @@ const DEFAULT_LOCAL = "http://127.0.0.1:8080";
  * The magnet goes in the fragment rather than the query so it never leaves the
  * browser: not into that server's log, not into a proxy's, not into a Referer.
  */
-function watchHere(base: string, open: string): string {
+function watchHere(base: string, open: string, alternatives: string[] = []): string {
   /* Guarded, because an unusable base produces a link that looks fine and does
      something quite different. With an empty base this built "/#magnet=...",
      which is a fragment on *this* page: clicking it scrolls to the top and
      nothing else happens, and there is nothing on screen to say why. */
   const trimmed = base.trim().replace(/\/+$/, "");
   const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
-  return `${usable}/#magnet=${encodeURIComponent(open)}`;
+  const alt = alternatives.map((m) => `&alt=${encodeURIComponent(m)}`).join("");
+  return `${usable}/#magnet=${encodeURIComponent(open)}${alt}`;
 }
 
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -272,7 +274,7 @@ export default function Page() {
       if (!response.ok) throw new Error(body?.error ?? `${response.status}`);
       setPicked({ episode, choice: body as Pick });
       // Straight to the player, which resolves and starts on its own.
-      window.open(watchHere(local, body.magnet), "balerion");
+      window.open(watchHere(local, body.magnet, body.alternatives ?? []), "balerion");
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not find anything to play");
     } finally {

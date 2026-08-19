@@ -1222,8 +1222,13 @@ let opening = 0;
 /** Whether there were results to return to when this torrent was opened. */
 let hadResults = false;
 
-async function openTorrent(what) {
+async function openTorrent(what, alternatives = []) {
   const ticket = ++opening;
+  /* A magnet resolves by asking the swarm for a file list, and a swarm can have
+   * seeders that will send data but none that will answer that request. When the
+   * caller has offered other releases of the same thing, trying the next one
+   * beats reporting a failure the viewer can do nothing about. */
+  const queue = [what, ...alternatives];
 
   show(el.failure, false);
   show(el.torrent, false);
@@ -1256,14 +1261,33 @@ async function openTorrent(what) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   try {
-    const info = await api("/api/resolve", json({ magnet: what }));
-    if (ticket !== opening) return; // superseded; leave the page alone
+    let info = null;
+    let lastError = null;
+    for (const [attempt, magnet] of queue.entries()) {
+      if (ticket !== opening) return; // superseded; leave the page alone
+      if (attempt > 0) {
+        el.pendingNote.textContent =
+          `That release had no peer willing to send a file list. ` +
+          `Trying another (${attempt + 1} of ${queue.length}).`;
+      }
+      try {
+        info = await api("/api/resolve", json({ magnet }));
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (ticket !== opening) return;
+    if (!info) throw lastError ?? new Error("nothing to open");
     renderTorrent(info);
     refresh();
   } catch (err) {
     if (ticket !== opening) return;
     show(el.failure, true);
-    el.failureBody.textContent = err.message;
+    el.failureBody.textContent =
+      queue.length > 1
+        ? `None of the ${queue.length} releases tried would open. ${err.message}`
+        : err.message;
   } finally {
     doneWaiting();
     // Whatever happened, the spinner goes. Hiding it only on the paths that
@@ -1422,11 +1446,14 @@ function openFromFragment() {
   const params = new URLSearchParams(fragment);
   const magnet = params.get("magnet");
   if (!magnet) return false;
+  // Other releases of the same thing, in the order whoever sent us here ranked
+  // them. Only used if the first will not open.
+  const alternatives = params.getAll("alt");
 
   history.replaceState(null, "", window.location.pathname);
   setMode("link");
   el.magnet.value = magnet;
-  openTorrent(magnet);
+  openTorrent(magnet, alternatives);
   return true;
 }
 

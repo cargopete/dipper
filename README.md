@@ -93,6 +93,19 @@ count, and the page asks again every few seconds instead of giving up. The
 verdict only becomes "unsupported" once the torrent is complete and the file
 still cannot be read, which is the only time it is true.
 
+### When a swarm will not hand over a file list
+
+A magnet is only an infohash: the file list has to be asked for, and a swarm can
+have seeders that will happily send data and none that will answer that request.
+No seeder count predicts it.
+
+Two things follow. Resolving keeps looking rather than reporting a failure after
+one sweep of whatever discovery first returned, since most addresses on a public
+swarm are unreachable and the DHT keeps turning up more. And a magnet handed over
+in a fragment can carry alternates (`&alt=`), which the player tries in order
+when the first will not open. Another release of the same thing is the only real
+cure.
+
 ### One episode at a time
 
 Three copies of the same episode do not download three times faster: they share

@@ -64,6 +64,8 @@ export async function GET(request: Request) {
       overBudget: choice.overBudget,
       considered: choice.considered,
       why: choice.why,
+      // Tried in order if the first will not give up a file list.
+      alternatives: choice.alternatives.map((hit) => hit.magnet),
     });
   } catch (err) {
     if (err instanceof RelayError) {
