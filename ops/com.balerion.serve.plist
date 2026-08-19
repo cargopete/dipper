@@ -29,6 +29,19 @@
     <string>__PORT__</string>
   </array>
 
+  <!--
+    launchd does not read your shell profile, and hands an agent a PATH of
+    /usr/bin:/bin:/usr/sbin:/sbin. Homebrew is not on it, so a player started
+    this way cannot find ffmpeg and quietly offers downloads instead of playing
+    anything that needs converting, while the same binary run from a terminal
+    works perfectly. Spelled out here so the two behave the same.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+
   <key>RunAtLoad</key>
   <true/>
 

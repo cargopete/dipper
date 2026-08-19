@@ -37,6 +37,7 @@ const el = {
   meta: $("torrent-meta"),
   keep: $("keep"),
   discard: $("discard"),
+  backToResults: $("back-to-results"),
   viewer: $("viewer"),
   video: $("video"),
   viewerNote: $("viewer-note"),
@@ -1061,6 +1062,8 @@ function renderResults(data) {
  * redraw the page underneath them. Each attempt takes a ticket, and only the
  * newest one is allowed to touch the interface. */
 let opening = 0;
+/** Whether there were results to return to when this torrent was opened. */
+let hadResults = false;
 
 async function openTorrent(what) {
   const ticket = ++opening;
@@ -1069,6 +1072,16 @@ async function openTorrent(what) {
   show(el.torrent, false);
   show(el.pending, true);
   el.pendingNote.textContent = "Fetching the file list";
+
+  /* The results have done their job. Leaving two dozen rows above the player
+   * pushes it down the page and makes the thing you actually asked for the
+   * least visible item on screen.
+   *
+   * Hidden rather than emptied, so going back costs nothing and does not
+   * re-run the search. */
+  hadResults = !el.results.hidden;
+  show(el.results, false);
+  show(el.backToResults, hadResults);
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   try {
@@ -1103,6 +1116,8 @@ el.searchForm.addEventListener("submit", async (event) => {
 
   try {
     renderResults(await api(chosen.query(terms)));
+    // A fresh list is worth returning to, whatever was open before.
+    show(el.backToResults, true);
   } catch (err) {
     show(el.results, false);
     show(el.failure, true);
@@ -1159,6 +1174,16 @@ el.keep.addEventListener("change", async () => {
     show(el.failure, true);
     el.failureBody.textContent = err.message;
   }
+});
+
+/* Back to the list, without disturbing the player.
+ *
+ * The torrent panel stays where it is rather than being hidden: hiding a playing
+ * video does not stop it, and a page that carries on with sound from something
+ * you cannot see is worse than one that shows you both. */
+el.backToResults.addEventListener("click", () => {
+  show(el.results, true);
+  el.results.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 
 el.discard.addEventListener("click", async () => {

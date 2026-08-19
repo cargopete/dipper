@@ -24,8 +24,14 @@ fi
 
 mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
 
+# Whatever this shell can see, plus the usual Homebrew prefixes, since launchd
+# provides none of them and ffmpeg is the difference between playing a file and
+# offering it as a download.
+AGENT_PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 sed -e "s|__BINARY__|$BINARY|" \
     -e "s|__PORT__|$PORT|" \
+    -e "s|__PATH__|$AGENT_PATH|" \
     -e "s|__LOGDIR__|$LOGDIR|" \
     "$(dirname "$0")/com.balerion.serve.plist" > "$PLIST"
 
@@ -39,6 +45,14 @@ launchctl enable "gui/$UID/$LABEL"
 for _ in $(seq 1 20); do
   if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/api/shelves"; then
     echo "player is up on http://127.0.0.1:$PORT and will start at login"
+    # Worth checking rather than assuming: without ffmpeg it still serves, and
+    # only says so when you try to play something it cannot open.
+    if grep -q "ffmpeg found" "$LOGDIR/serve.log" 2>/dev/null; then
+      echo "ffmpeg found, so anything that needs converting will play"
+    else
+      echo "WARNING: it did not find ffmpeg. MKV and AVI will be offered as" >&2
+      echo "downloads rather than played. Check that ffmpeg is on: $AGENT_PATH" >&2
+    fi
     exit 0
   fi
   sleep 1

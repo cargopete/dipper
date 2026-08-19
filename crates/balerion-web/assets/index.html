@@ -125,6 +125,11 @@
     <div class="torrent-head">
       <h2 id="torrent-name"></h2>
       <div class="torrent-actions">
+        <!-- Shown only when there are results to go back to, which is not the
+             case when a magnet was pasted or a link opened this directly. -->
+        <button type="button" id="back-to-results" class="button-quiet" hidden>
+          Back to results
+        </button>
         <label class="toggle">
           <input type="checkbox" id="keep">
           <span>Keep offline</span>
