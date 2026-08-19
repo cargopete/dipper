@@ -544,6 +544,34 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
 .advisory strong { color: var(--ink); font-weight: 600; }
 .advisory .mono { color: var(--ink); font-family: var(--mono); }
 
+/* The address to hand a television. Monospace and selectable, because it is
+   going to be typed or copied rather than clicked. */
+.cast {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1.1rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+}
+.cast-label {
+  font-family: var(--mono);
+  font-size: 0.63rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.cast-url {
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  flex: 1;
+  min-width: 12rem;
+}
+
 /* ---- the piece map ------------------------------------------------------
  * The only thing on the page that moves of its own accord, and it earns it:
  * this is what tells you whether a stutter is Balerion being slow or the swarm

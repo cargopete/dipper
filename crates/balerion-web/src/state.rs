@@ -43,6 +43,10 @@ pub struct ServeConfig {
     pub peer_port: u16,
     pub dht_budget: Duration,
     pub tracker_timeout: Duration,
+    /// Port for the media-only listener a television fetches from, when one is
+    /// wanted. `None` keeps everything on loopback, which is the default
+    /// because it is the only setting that exposes nothing.
+    pub cast_port: Option<u16>,
 }
 
 /// One torrent the server is looking after.

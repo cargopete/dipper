@@ -174,6 +174,27 @@ pub async fn resolve(
     Ok(Json(info))
 }
 
+/// Where a television should be pointed, when casting is switched on.
+#[derive(Debug, Serialize)]
+pub struct CastInfo {
+    /// The base URL to hand a receiver, or none when casting is off or this
+    /// machine has no address another device could reach.
+    pub base: Option<String>,
+    pub enabled: bool,
+}
+
+/// Told to the page so it can offer a link rather than making anyone work out
+/// their own address.
+pub async fn cast_info(State(state): State<Arc<AppState>>) -> Json<CastInfo> {
+    let port = state.config.cast_port;
+    let base =
+        port.and_then(|port| crate::cast::lan_address().map(|ip| format!("http://{ip}:{port}")));
+    Json(CastInfo {
+        enabled: port.is_some(),
+        base,
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct Stats {
     pub infohash: String,

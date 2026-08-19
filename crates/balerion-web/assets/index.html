@@ -141,7 +141,12 @@
 
     <div class="stage">
       <div class="viewer" id="viewer">
-        <video id="video" controls playsinline preload="metadata"></video>
+        <!-- x-webkit-airplay is what puts the AirPlay button in Safari's own
+             controls. It only does anything for media the receiver can fetch
+             itself, which is why transcoded files are given the playlist rather
+             than a MediaSource blob when the browser will take one. -->
+        <video id="video" controls playsinline preload="metadata"
+               x-webkit-airplay="allow"></video>
         <p class="viewer-note" id="viewer-note" hidden></p>
       </div>
 
@@ -157,6 +162,15 @@
     </div>
 
     <p class="advisory" id="advisory" hidden role="status"></p>
+
+    <!-- Only shown when casting is switched on and this machine has an address
+         another device could reach. A television fetches the media itself, so
+         what it needs is a URL rather than a button in this page. -->
+    <div class="cast" id="cast" hidden>
+      <span class="cast-label">Cast to a television</span>
+      <code class="cast-url" id="cast-url"></code>
+      <button type="button" id="cast-copy" class="button-small">Copy</button>
+    </div>
 
     <figure class="piecemap">
       <canvas id="piecemap" height="28"></canvas>

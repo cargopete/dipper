@@ -5,6 +5,7 @@
 //! serves the result over HTTP on localhost. The interesting part is that it
 //! serves bytes that have not arrived yet: see [`stream`].
 
+pub mod cast;
 pub mod ffmpeg;
 pub mod fmp4;
 pub mod media;
@@ -42,6 +43,7 @@ impl Default for ServeConfig {
             peer_port: 6881,
             dht_budget: std::time::Duration::from_secs(20),
             tracker_timeout: std::time::Duration::from_secs(10),
+            cast_port: None,
         }
     }
 }
@@ -73,6 +75,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/app.css", get(routes::stylesheet))
         .route("/app.js", get(routes::script))
         .route("/api/play/{hash}/{file}", get(play::info))
+        .route("/api/play/{hash}/{file}/index.m3u8", get(play::playlist))
         .route("/api/play/{hash}/{file}/init.mp4", get(play::init))
         .route("/api/play/{hash}/{file}/seg/{index}", get(play::segment))
         .route("/api/play/{hash}/{file}/subs/{track}", get(play::embedded))
@@ -82,6 +85,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/tpb/search", get(tpb::handler))
         .route("/api/tpb/categories", get(tpb::categories))
         .route("/api/resolve", post(routes::resolve))
+        .route("/api/cast", get(routes::cast_info))
         .route("/api/torrents", get(routes::list))
         .route("/api/torrents/{hash}", get(routes::stats))
         .route("/api/torrents/{hash}", delete(routes::remove))
@@ -137,6 +141,24 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
              played. Install ffmpeg to have them converted."
         );
     }
+    if let Some(port) = state.config.cast_port {
+        // Bound wide on purpose: the whole point is that a television on the
+        // network can reach it. What it serves is the reason that is safe.
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let cast_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(err) = cast::serve(cast_state, address).await {
+                tracing::error!(%err, "the cast listener stopped");
+            }
+        });
+        match cast::lan_address() {
+            Some(ip) => println!("televisions should be pointed at http://{ip}:{port}"),
+            None => println!(
+                "casting is on, but this machine has no LAN address, so nothing can reach it"
+            ),
+        }
+    }
+
     println!("paste a magnet link to start watching. Ctrl-C to stop.");
 
     axum::serve(listener, router(state))

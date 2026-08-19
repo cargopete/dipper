@@ -12,6 +12,7 @@ set -euo pipefail
 
 LABEL="com.balerion.serve"
 PORT="${PORT:-8080}"
+CAST_PORT="${CAST_PORT:-8081}"
 BINARY="${BINARY:-$HOME/.cargo/bin/balerion}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGDIR="$HOME/Library/Logs/balerion"
@@ -31,6 +32,7 @@ AGENT_PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 sed -e "s|__BINARY__|$BINARY|" \
     -e "s|__PORT__|$PORT|" \
+    -e "s|__CAST_PORT__|$CAST_PORT|" \
     -e "s|__PATH__|$AGENT_PATH|" \
     -e "s|__LOGDIR__|$LOGDIR|" \
     "$(dirname "$0")/com.balerion.serve.plist" > "$PLIST"
@@ -45,6 +47,7 @@ launchctl enable "gui/$UID/$LABEL"
 for _ in $(seq 1 20); do
   if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$PORT/api/shelves"; then
     echo "player is up on http://127.0.0.1:$PORT and will start at login"
+    echo "casting is served on port $CAST_PORT, media only"
     # Worth checking rather than assuming: without ffmpeg it still serves, and
     # only says so when you try to play something it cannot open.
     if grep -q "ffmpeg found" "$LOGDIR/serve.log" 2>/dev/null; then

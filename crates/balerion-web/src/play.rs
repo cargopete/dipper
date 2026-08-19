@@ -49,6 +49,12 @@ pub enum PlayInfo {
         segment_seconds: f64,
         init: String,
         segment_prefix: String,
+        /// An HLS playlist covering the same segments.
+        ///
+        /// Safari plays this natively, which is also what makes AirPlay work:
+        /// the television is handed this URL and fetches it itself, which it
+        /// cannot do with a MediaSource blob.
+        playlist: String,
         tracks: Vec<Track>,
         /// True when only the wrapper is being changed, which is worth saying
         /// because it is the cheap case and the quality is untouched.
@@ -155,6 +161,7 @@ pub async fn info(
         segment_seconds: ffmpeg::SEGMENT_SECONDS,
         init: format!("/api/play/{hash}/{file}/init.mp4"),
         segment_prefix: format!("/api/play/{hash}/{file}/seg/"),
+        playlist: format!("/api/play/{hash}/{file}/index.m3u8"),
         tracks,
         remux_only: plan.copy_video && (plan.copy_audio || !plan.has_audio),
     }))
@@ -442,6 +449,87 @@ pub async fn embedded(
 
 fn vtt_response(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/vtt; charset=utf-8")], body).into_response()
+}
+
+/// An HLS playlist for a transcoded file.
+///
+/// This is what makes casting possible at all. A television is a separate box
+/// on the network: it is handed a URL and fetches the media itself, so anything
+/// it plays has to exist as a resource. The MediaSource path hands the browser
+/// a blob with no URL behind it, which no Apple TV or Chromecast can reach.
+///
+/// The segments themselves already exist, so this is a text file pointing at
+/// them. `EXT-X-VERSION:7` and `EXT-X-MAP` are what allow fragmented MP4 rather
+/// than the MPEG-TS of older HLS, which means the same segments serve the
+/// browser and the television.
+///
+/// Durations are declared as measured rather than as requested. ffmpeg returns
+/// a little over the six seconds asked for, and a playlist that claims a round
+/// number while the media says otherwise makes a player's seeking drift further
+/// the longer the film runs.
+pub async fn playlist(
+    State(state): State<Arc<AppState>>,
+    Path((hash, file)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    let info_hash = parse(&hash)?;
+    let torrent = torrent(&state, &info_hash)?;
+    torrent.touch();
+
+    let Some(tools) = state.tools.clone() else {
+        return Err(ApiError::bad_request(
+            "this file needs converting and ffmpeg was not found",
+        ));
+    };
+    let probe = state
+        .probe(&tools, &info_hash, file)
+        .await
+        .map_err(|err| ApiError::bad_request(format!("could not read this file: {err}")))?;
+
+    if probe.duration <= 0.0 {
+        return Err(ApiError::bad_request(
+            "this file has no duration, so it cannot be served as a playlist",
+        ));
+    }
+
+    let segment_seconds = ffmpeg::SEGMENT_SECONDS;
+    let count = (probe.duration / segment_seconds).ceil() as u32;
+
+    let mut playlist = String::with_capacity(64 + count as usize * 32);
+    playlist.push_str("#EXTM3U\n");
+    // 7 is the first version that understands EXT-X-MAP, and so fragmented MP4.
+    playlist.push_str("#EXT-X-VERSION:7\n");
+    // Rounded up, and never below the longest segment, or players reject it.
+    playlist.push_str(&format!(
+        "#EXT-X-TARGETDURATION:{}\n",
+        segment_seconds.ceil() as u32
+    ));
+    playlist.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
+    // The whole file exists and is not going to grow, which lets a player seek
+    // anywhere immediately instead of treating it as a live stream.
+    playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
+    playlist.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+    playlist.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n");
+
+    for index in 0..count {
+        // The last one is short, and saying so keeps the declared total equal to
+        // the real one.
+        let start = f64::from(index) * segment_seconds;
+        let length = (probe.duration - start).min(segment_seconds);
+        playlist.push_str(&format!("#EXTINF:{length:.3},\nseg/{index}\n"));
+    }
+    playlist.push_str("#EXT-X-ENDLIST\n");
+
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.apple.mpegurl",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
+        playlist,
+    )
+        .into_response())
 }
 
 #[cfg(test)]

@@ -27,6 +27,11 @@
     <string>serve</string>
     <string>--port</string>
     <string>__PORT__</string>
+    <!-- Media only, bound wide so a television can fetch from it. It serves
+         byte ranges, playlists and segments and nothing else: no download can
+         be started through it and nothing can be listed or deleted. -->
+    <string>--cast-port</string>
+    <string>__CAST_PORT__</string>
   </array>
 
   <!--

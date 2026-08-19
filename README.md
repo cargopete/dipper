@@ -81,6 +81,35 @@ the tail. A front-to-back sequential picker never serves it and playback hangs
 forever. Letting the requests steer the picker handles both layouts, and makes
 seeking work for nothing.
 
+### Casting to a television
+
+```sh
+balerion serve --cast-port 8081
+```
+
+A television is not a browser tab. An Apple TV or a Chromecast is a separate box
+on the network: it is handed a URL and fetches the media itself, so nothing can
+be cast that does not exist as a resource it can reach. That rules out two
+things. `127.0.0.1` is no use to another device, and the MediaSource path hands
+the browser a blob with no URL behind it at all.
+
+So `--cast-port` opens a second listener, bound to every interface, serving the
+media and nothing else: byte ranges of files already being fetched, plus the HLS
+playlist and segments that go with them. It cannot start a download, cannot stop
+one, cannot list what is on disk and will not serve the page. The worst anyone on
+your network can do with it is watch something you are already watching. Binding
+the whole player to the LAN instead would hand them `/api/resolve`, which
+downloads whatever magnet it is given.
+
+Transcoded files are served as HLS over the same fragmented MP4 segments the
+browser already uses, so one representation feeds the browser, AirPlay and
+Chromecast alike. Safari plays that playlist natively, which is what makes its
+AirPlay button work; other browsers keep using MediaSource for now. The player
+shows the address to hand a receiver, since working out your own is nobody's idea
+of a feature.
+
+Off unless asked for, because it is the only setting that exposes nothing.
+
 ### Containers browsers will not open
 
 `.mp4`, `.m4v`, `.webm` and the common audio formats stream directly. Anything

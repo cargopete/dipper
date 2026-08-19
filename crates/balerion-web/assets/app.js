@@ -45,6 +45,9 @@ const el = {
   map: $("piecemap"),
   mapStatus: $("piecemap-status"),
   advisory: $("advisory"),
+  cast: $("cast"),
+  castUrl: $("cast-url"),
+  castCopy: $("cast-copy"),
   library: $("library"),
   libraryList: $("library-list"),
   peers: $("t-peers"),
@@ -590,6 +593,7 @@ async function play(index) {
 
   playInfo = info;
   attachTracks(info.tracks);
+  showCastUrl();
 
   if (info.mode === "unsupported") {
     showViewerNote(info.reason, info.download);
@@ -601,6 +605,21 @@ async function play(index) {
     show(el.viewerNote, false);
     show(el.pending, false);
     el.video.src = info.url;
+    el.video.load();
+    el.video.play().catch(() => {
+      // Autoplay refused. The controls are right there.
+    });
+    return;
+  }
+
+  /* Safari plays HLS itself, and doing it that way is what makes AirPlay work:
+   * the television is handed a URL and fetches it, which it cannot do with a
+   * MediaSource blob. Everywhere else, feed MediaSource as before. */
+  if (el.video.canPlayType("application/vnd.apple.mpegurl") && info.playlist) {
+    show(el.video, true);
+    show(el.viewerNote, false);
+    show(el.pending, false);
+    el.video.src = info.playlist;
     el.video.load();
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
@@ -632,6 +651,51 @@ el.video.addEventListener("waiting", () => pump());
 el.video.addEventListener("seeking", () => reseek());
 
 /* ---- rendering --------------------------------------------------------- */
+
+/* Where a television should be pointed for the file being played.
+ *
+ * The player's own address is loopback and means nothing to another device, so
+ * the server is asked for one the network can reach. Transcoded files get the
+ * playlist; anything a television could already open gets the file itself. */
+let castBase = null;
+
+async function loadCastBase() {
+  try {
+    const info = await api("/api/cast");
+    castBase = info.base;
+  } catch {
+    castBase = null;
+  }
+}
+
+function showCastUrl() {
+  if (!castBase || !current || playing === null || !playInfo) {
+    show(el.cast, false);
+    return;
+  }
+  const path =
+    playInfo.mode === "transcode"
+      ? playInfo.playlist
+      : `/stream/${current.infohash}/${playing}`;
+  if (!path) {
+    show(el.cast, false);
+    return;
+  }
+  el.castUrl.textContent = `${castBase}${path}`;
+  show(el.cast, true);
+}
+
+el.castCopy.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(el.castUrl.textContent);
+    el.castCopy.textContent = "Copied";
+    window.setTimeout(() => {
+      el.castCopy.textContent = "Copy";
+    }, 1600);
+  } catch {
+    // The text is selectable; that is a good enough fallback.
+  }
+});
 
 function renderFiles() {
   el.files.replaceChildren();
@@ -1291,6 +1355,7 @@ function openFromFragment() {
 
 setMode("search");
 loadFilters();
+loadCastBase();
 startPolling();
 openFromFragment();
 

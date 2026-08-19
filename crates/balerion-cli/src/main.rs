@@ -237,6 +237,15 @@ enum Command {
         #[arg(long)]
         low_bandwidth: bool,
 
+        /// Also serve media on this port, bound to every interface, so a
+        /// television can fetch from it.
+        ///
+        /// Off unless asked for. It serves byte ranges, playlists and segments
+        /// and nothing else: no downloads can be started through it, and it
+        /// cannot list or delete anything.
+        #[arg(long, value_name = "PORT")]
+        cast_port: Option<u16>,
+
         /// The port we tell peers and trackers we listen on.
         #[arg(long, default_value_t = 6881)]
         peer_port: u16,
@@ -552,6 +561,7 @@ async fn run(cli: Cli) -> Result<()> {
             port,
             host,
             output,
+            cast_port,
             low_bandwidth,
             peer_port,
             no_dht,
@@ -561,6 +571,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let mut config = balerion_web::ServeConfig {
                 host: *host,
+                cast_port: *cast_port,
                 port: *port,
                 data_dir: output
                     .clone()
