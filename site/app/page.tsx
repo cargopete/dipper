@@ -650,10 +650,16 @@ export default function Page() {
             Balerion running on your own machine: <code>balerion serve</code>.
           </p>
           <p style={{ marginTop: "0.6rem" }}>
-            <strong>Watch</strong> opens the Balerion running on the machine you are reading this
-            on, at <code>{local}</code>, with the magnet already handed over. If nothing is
-            running there the tab simply will not load, which is the case on a phone. Copy
-            magnet always works.
+            <strong>Watch</strong> opens Balerion at <code>{local}</code> with the magnet already
+            handed over. That default is loopback, which means <em>this device</em>, so it works
+            on the machine running Balerion and fails on a phone with &ldquo;could not connect to
+            the server&rdquo;: your phone is not running one.
+          </p>
+          <p style={{ marginTop: "0.6rem" }}>
+            To use it from a phone, give that machine an address the phone can reach and set it
+            below. <code>tailscale serve --bg 8080</code> publishes it to your tailnet and nothing
+            else, which is the one way to do this that does not also hand it to whoever else is on
+            the wifi. Then set the address to your machine&apos;s <code>.ts.net</code> name.
           </p>
           <p style={{ marginTop: "0.6rem" }}>
             The Archive is searched from here directly. apibay refuses datacentre addresses, so
@@ -663,7 +669,7 @@ export default function Page() {
               className="button-small quiet"
               onClick={() => setShowLocal((was) => !was)}
             >
-              {showLocal ? "Done" : "Change local address"}
+              {showLocal ? "Done" : "Set the address for this device"}
             </button>
           </p>
           {showLocal ? (
@@ -677,6 +683,10 @@ export default function Page() {
                 onChange={(event) => rememberLocal(event.target.value)}
                 placeholder={DEFAULT_LOCAL}
               />
+              <p className="hint" style={{ marginTop: "0.5rem" }}>
+                Remembered in this browser only, because it describes the device you are holding.
+                On the machine running Balerion, leave it as {DEFAULT_LOCAL}.
+              </p>
             </div>
           ) : null}
         </section>
