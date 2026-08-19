@@ -399,8 +399,36 @@ ul.results li:nth-child(10) { animation-delay: 180ms; }
   .masthead { padding: 0 1rem; }
   .masthead-note { display: none; }
   .search-row { grid-template-columns: 1fr; }
-  ul.results li { grid-template-columns: 1fr auto; }
-  .button-small { min-width: 0; }
+  .console { padding: 1.1rem 1.1rem 1.3rem; }
+
+  /* A result becomes two lines rather than four half-lines. Collapsing the
+     desktop grid to `1fr auto` reflowed it into title-beside-swarm and then
+     size-beside-button, which read as two unrelated rows of a table nobody
+     designed. Named areas put the name on top and the figures underneath with
+     the action, which is the order you actually read them in. */
+  ul.results li {
+    grid-template-columns: auto auto 1fr;
+    grid-template-areas:
+      "title title  title"
+      "swarm size   action";
+    gap: 0.5rem 0.9rem;
+    align-items: center;
+  }
+  .result-title { grid-area: title; }
+  .result-swarm { grid-area: swarm; }
+  .result-size { grid-area: size; }
+  ul.results .button-small { grid-area: action; justify-self: end; }
+
+  /* Thumbs, not pointers. Anything under about 40px is a game of chance on a
+     phone, and this is the one control on the page that matters. */
+  .button-small {
+    min-width: 0;
+    min-height: 2.5rem;
+    padding: 0.55rem 0.9rem;
+  }
+
+  /* The count sits beside the heading and has nowhere to go at this width. */
+  .results-head { flex-wrap: wrap; gap: 0.2rem 1rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

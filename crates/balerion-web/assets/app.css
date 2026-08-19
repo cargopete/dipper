@@ -705,9 +705,29 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
   .reading { border-right: 1px solid var(--rule); }
   .modes button { margin-right: 1.2rem; }
   .search-row, .intake-row { grid-template-columns: 1fr; }
-  #file-list li, #library-list li, #result-list li {
+  #file-list li, #library-list li {
     grid-template-columns: 1fr auto;
   }
+
+  /* The same fix as the search site: collapsing four columns to two reflowed a
+     result into title-beside-swarm and then size-beside-button, which reads as
+     two unrelated half rows. Named areas keep the name on top and the figures
+     with the action underneath. */
+  #result-list li {
+    grid-template-columns: auto auto 1fr;
+    grid-template-areas:
+      "title title title"
+      "swarm size  action";
+    gap: 0.5rem 0.9rem;
+    align-items: center;
+  }
+  .result-title { grid-area: title; }
+  .result-swarm { grid-area: swarm; }
+  .result-size { grid-area: size; }
+  #result-list .button-small { grid-area: action; justify-self: end; }
+
+  /* Thumbs, not pointers. */
+  .button-small { min-height: 2.5rem; padding: 0.55rem 0.9rem; }
   .torrent-head { flex-direction: column; align-items: flex-start; }
 }
 
