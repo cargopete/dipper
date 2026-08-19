@@ -1210,3 +1210,13 @@ setMode("search");
 loadFilters();
 startPolling();
 openFromFragment();
+
+/* A second magnet arriving at an already-open tab.
+ *
+ * The search site aims its Watch links at a named window, so the first click
+ * opens this page and every click after that lands on the tab already showing
+ * it. That is a same-document navigation: the page does not reload, so reading
+ * the fragment once at startup would quietly ignore every magnet after the
+ * first. `replaceState` does not fire this event, so clearing the fragment above
+ * cannot loop back round here. */
+window.addEventListener("hashchange", openFromFragment);

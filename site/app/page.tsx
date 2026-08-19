@@ -352,7 +352,12 @@ export default function Page() {
                       <a
                         className="button-small"
                         href={watchHere(local, row.copy ?? "")}
-                        target="_blank"
+                        /* A named target rather than _blank: the first Watch
+                           opens a Balerion tab and every one after it reuses
+                           that same tab, instead of leaving a row of them
+                           behind. The player listens for the fragment changing
+                           as well as for load, which is what makes reuse work. */
+                        target="balerion"
                         rel="noreferrer noopener"
                         title={`Opens the Balerion running at ${local}`}
                       >
