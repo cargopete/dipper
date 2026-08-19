@@ -74,26 +74,24 @@ pub struct Results {
     pub note: &'static str,
 }
 
-pub async fn handler(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<SearchParams>,
-) -> Result<Json<Results>, ApiError> {
-    let key = params.category.as_deref().unwrap_or("video");
-    let category = category::find(key).unwrap_or(&category::CATEGORIES[0]);
-    let limit = params.limit.unwrap_or(24).clamp(1, 100) as usize;
+/// Filter and order what apibay returned.
+///
+/// Extracted from the handler so that the relay, the full server and the tests
+/// all exercise the same code. It used to live inline with a test that copied
+/// it line for line, which is a test that passes when the copy is right rather
+/// than when the code is.
+/// Returns the page of hits, the total that survived filtering *before* the
+/// limit, and the two exclusion tallies. The total is deliberately the
+/// pre-truncation figure: "showing 24 of 24" when the search found 55 reads as
+/// though 24 was all there was.
+pub struct Shortlist {
+    pub hits: Vec<Hit>,
+    pub total: usize,
+    pub unseeded: usize,
+    pub oversize: usize,
+}
 
-    // Unlike the archive, apibay has no browse: an empty query returns its
-    // no-results sentinel, which would surface as "nothing matches that",
-    // which is not what happened.
-    let terms = params.q.trim();
-    if terms.is_empty() {
-        return Err(ApiError::bad_request("type something to search for"));
-    }
-
-    let found = search::search(&state.tpb, terms, category.code)
-        .await
-        .map_err(|err| ApiError::bad_request(format!("apibay search failed: {err}")))?;
-
+pub fn shortlist(found: Vec<Hit>, cap: Option<u64>, limit: usize) -> Shortlist {
     let usable: Vec<Hit> = found
         .into_iter()
         // Belt and braces: the category code should have done this, and a
@@ -104,7 +102,6 @@ pub async fn handler(
 
     // Size before seeders, so the two counts do not overlap and each reports
     // only what it alone excluded.
-    let cap = params.thin.then(|| category.thin_cap());
     let affordable: Vec<Hit> = match cap {
         Some(cap) => usable
             .iter()
@@ -127,16 +124,54 @@ pub async fn handler(
     seeded.sort_by_key(|hit| std::cmp::Reverse(hit.seeders));
     let total = seeded.len();
     seeded.truncate(limit);
-
-    Ok(Json(Results {
+    Shortlist {
         hits: seeded,
         total,
         unseeded,
         oversize,
+    }
+}
+
+/// Run a search and shape the answer. Shared by the web handler and the relay.
+pub async fn run_search(
+    client: &balerion_tpb::TpbClient,
+    params: &SearchParams,
+) -> Result<Results, ApiError> {
+    let key = params.category.as_deref().unwrap_or("video");
+    let category = category::find(key).unwrap_or(&category::CATEGORIES[0]);
+    let limit = params.limit.unwrap_or(24).clamp(1, 100) as usize;
+
+    // Unlike the archive, apibay has no browse: an empty query returns its
+    // no-results sentinel, which would surface as "nothing matches that",
+    // which is not what happened.
+    let terms = params.q.trim();
+    if terms.is_empty() {
+        return Err(ApiError::bad_request("type something to search for"));
+    }
+
+    let found = search::search(client, terms, category.code)
+        .await
+        .map_err(|err| ApiError::bad_request(format!("apibay search failed: {err}")))?;
+
+    let cap = params.thin.then(|| category.thin_cap());
+    let page = shortlist(found, cap, limit);
+
+    Ok(Results {
+        hits: page.hits,
+        total: page.total,
+        unseeded: page.unseeded,
+        oversize: page.oversize,
         cap,
         category: category.key.to_string(),
         note: category.note,
-    }))
+    })
+}
+
+pub async fn handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<Results>, ApiError> {
+    Ok(Json(run_search(&state.tpb, &params).await?))
 }
 
 #[derive(Debug, Serialize)]
@@ -197,36 +232,16 @@ mod tests {
         }
     }
 
-    /// The filtering and ordering, without the network. Mirrors the body of
-    /// [`handler`]: if that changes, this should be made to change with it.
-    fn shortlist(found: Vec<Hit>, limit: usize, cap: Option<u64>) -> (Vec<Hit>, usize, usize) {
-        let usable: Vec<Hit> = found
-            .into_iter()
-            .filter(|hit| category::is_video(hit.category))
-            .collect();
-        let affordable: Vec<Hit> = match cap {
-            Some(cap) => usable
-                .iter()
-                .filter(|hit| hit.size_bytes <= cap)
-                .cloned()
-                .collect(),
-            None => usable.clone(),
-        };
-        let oversize = usable.len() - affordable.len();
-        let mut seeded: Vec<Hit> = affordable
-            .iter()
-            .filter(|hit| hit.seeders >= MIN_SEEDERS)
-            .cloned()
-            .collect();
-        let unseeded = affordable.len() - seeded.len();
-        seeded.sort_by_key(|hit| std::cmp::Reverse(hit.seeders));
-        seeded.truncate(limit);
-        (seeded, unseeded, oversize)
+    /// The real function, with the arguments in test order.
+    fn shortlisted(found: Vec<Hit>, limit: usize, cap: Option<u64>) -> (Vec<Hit>, usize, usize) {
+        let page = super::shortlist(found, cap, limit);
+        (page.hits, page.unseeded, page.oversize)
     }
 
     #[test]
     fn a_dead_swarm_is_not_offered_but_is_counted() {
-        let (hits, unseeded, _) = shortlist(vec![hit(0, 207), hit(5, 207), hit(0, 208)], 24, None);
+        let (hits, unseeded, _) =
+            shortlisted(vec![hit(0, 207), hit(5, 207), hit(0, 208)], 24, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(unseeded, 2, "the drop has to be visible somewhere");
     }
@@ -235,14 +250,15 @@ mod tests {
     fn anything_outside_video_is_dropped_and_not_counted_as_unseeded() {
         // A non-video row was never a candidate, so counting it among the
         // unseeded would misreport what the search found.
-        let (hits, unseeded, _) = shortlist(vec![hit(9, 505), hit(9, 101), hit(1, 201)], 24, None);
+        let (hits, unseeded, _) =
+            shortlisted(vec![hit(9, 505), hit(9, 101), hit(1, 201)], 24, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(unseeded, 0);
     }
 
     #[test]
     fn the_healthiest_swarm_comes_first() {
-        let (hits, ..) = shortlist(vec![hit(3, 207), hit(90, 207), hit(12, 207)], 24, None);
+        let (hits, ..) = shortlisted(vec![hit(3, 207), hit(90, 207), hit(12, 207)], 24, None);
         let seeders: Vec<u64> = hits.iter().map(|hit| hit.seeders).collect();
         assert_eq!(seeders, vec![90, 12, 3]);
     }
@@ -250,7 +266,7 @@ mod tests {
     #[test]
     fn the_limit_applies_after_the_sort() {
         // Truncating first would leave the best result off the page.
-        let (hits, ..) = shortlist(vec![hit(1, 207), hit(2, 207), hit(500, 207)], 2, None);
+        let (hits, ..) = shortlisted(vec![hit(1, 207), hit(2, 207), hit(500, 207)], 2, None);
         assert_eq!(hits[0].seeders, 500);
         assert_eq!(hits.len(), 2);
     }
@@ -258,7 +274,7 @@ mod tests {
     #[test]
     fn a_cap_drops_what_is_too_big_and_counts_it() {
         let cap = category::find("hd_movies").unwrap().thin_cap();
-        let (hits, _, oversize) = shortlist(
+        let (hits, _, oversize) = shortlisted(
             vec![
                 sized_hit(9, 207, cap - 1),
                 sized_hit(9, 207, cap + 1),
@@ -276,7 +292,7 @@ mod tests {
         // The cap is what a thin line sustains, so equal to it is fine. An
         // off-by-one here silently loses the best result on the page.
         let cap = category::find("tv").unwrap().thin_cap();
-        let (hits, ..) = shortlist(vec![sized_hit(9, 205, cap)], 24, Some(cap));
+        let (hits, ..) = shortlisted(vec![sized_hit(9, 205, cap)], 24, Some(cap));
         assert_eq!(hits.len(), 1);
     }
 
@@ -286,7 +302,8 @@ mod tests {
         // one tally, or the numbers under the results add up to more than the
         // search returned.
         let cap = category::find("hd_movies").unwrap().thin_cap();
-        let (hits, unseeded, oversize) = shortlist(vec![sized_hit(0, 207, cap + 1)], 24, Some(cap));
+        let (hits, unseeded, oversize) =
+            shortlisted(vec![sized_hit(0, 207, cap + 1)], 24, Some(cap));
         assert!(hits.is_empty());
         assert_eq!(oversize, 1);
         assert_eq!(unseeded, 0, "already excluded by size");
@@ -294,9 +311,29 @@ mod tests {
 
     #[test]
     fn without_the_cap_nothing_is_excluded_for_size() {
-        let (hits, _, oversize) = shortlist(vec![sized_hit(9, 207, 40 << 30)], 24, None);
+        let (hits, _, oversize) = shortlisted(vec![sized_hit(9, 207, 40 << 30)], 24, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(oversize, 0);
+    }
+
+    #[test]
+    fn the_total_counts_what_survived_filtering_not_what_fitted_on_the_page() {
+        // The regression this exists for: reporting the post-truncation count
+        // as the total makes "showing 2 of 2" out of a search that found five,
+        // which reads as though five was two.
+        let page = super::shortlist(
+            vec![
+                hit(9, 207),
+                hit(8, 207),
+                hit(7, 207),
+                hit(6, 207),
+                hit(5, 207),
+            ],
+            None,
+            2,
+        );
+        assert_eq!(page.hits.len(), 2, "the page is limited");
+        assert_eq!(page.total, 5, "the total is not");
     }
 
     #[test]

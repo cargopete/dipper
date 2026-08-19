@@ -178,6 +178,32 @@ enum Command {
     /// Engine flags are spelled out here rather than shared with the other
     /// commands, so that `--port` can mean the web server, which is the one a
     /// user of this command actually cares about.
+    /// Serve the apibay search alone, for reaching from outside this machine.
+    ///
+    /// apibay refuses datacentre addresses, so a search hosted on Vercel cannot
+    /// work while one running here can. This is the smallest thing that can sit
+    /// on a domestic connection and be reached from elsewhere: it searches and
+    /// answers, and it cannot start a download, read a file or see the torrent
+    /// session. Put Tailscale Funnel in front of it.
+    Relay {
+        /// Port for the relay.
+        #[arg(long, default_value_t = 8090)]
+        port: u16,
+
+        /// Address to bind. Loopback by default: the tunnel connects to it from
+        /// this machine, so nothing else needs to.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
+
+        /// The bearer token every request must carry. Read from
+        /// BALERION_RELAY_TOKEN when this is not given.
+        ///
+        /// There is no default. A relay whose token nobody set would be an open
+        /// door with this machine's connection behind it.
+        #[arg(long)]
+        token: Option<String>,
+    },
+
     Serve {
         /// Port for the web player.
         #[arg(long, default_value_t = 8080)]
@@ -477,6 +503,23 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             let source = torrent_source::resolve(target, &client(&cli)?).await?;
             download::download_command(&source, output.clone(), &engine.into()).await
+        }
+
+        Command::Relay { port, host, token } => {
+            // Read from the environment when the flag is absent, so a launch
+            // agent can carry the token without it appearing in `ps` output for
+            // every process on the machine to read.
+            let token = token
+                .clone()
+                .or_else(|| std::env::var("BALERION_RELAY_TOKEN").ok())
+                .unwrap_or_default();
+            balerion_web::relay::serve(balerion_web::relay::RelayConfig {
+                host: *host,
+                port: *port,
+                token,
+            })
+            .await?;
+            Ok(())
         }
 
         Command::Serve {

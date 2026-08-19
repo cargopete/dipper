@@ -10,6 +10,7 @@ pub mod fmp4;
 pub mod media;
 pub mod play;
 pub mod range;
+pub mod relay;
 pub mod routes;
 pub mod search;
 pub mod state;

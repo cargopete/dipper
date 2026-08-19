@@ -33,17 +33,60 @@ constant time. That is a modest bar and worth being honest about: it stops the
 phrase leaking through a cookie jar or a proxy log, and it is not authentication
 in any serious sense. One password shared by everyone who has it never is.
 
-## The search rules live in two places
+## Two indexes, reached two different ways
 
-`lib/apibay.ts` is a deliberate port of the `balerion-tpb` crate: video
-categories only, never `cat=0` (which reaches the adult categories whatever you
-searched for), the no-results sentinel handled, zero-seeder results dropped and
-counted, and the thin-line size cap derived from 1.5 Mbit/s times the category's
-typical runtime.
+archive.org answers this deployment directly and needs nothing else running.
 
-The two implementations must agree. If the Rust changes those numbers, change
-them here in the same commit. As of writing, both return an identical cap of
-675,000,000 bytes for all-video and identical tallies for the same query.
+apibay does not. Cloudflare serves a bot challenge to datacentre addresses:
+measured from Vercel's `iad1`, both our own User-Agent and a full browser one
+get a `403` whose body is `<title>Just a moment...</title>`, while the same
+request from a domestic connection gets a clean `200`. No header shape fixes
+that, and solving the challenge would mean driving a headless browser, which is
+fragile, costs money per request and is precisely what the challenge exists to
+stop.
+
+So apibay queries are forwarded to a relay running on your own machine:
+
+```sh
+balerion relay --port 8090            # token from BALERION_RELAY_TOKEN
+tailscale funnel --bg 8090            # expose it over HTTPS
+```
+
+`ops/install-relay.sh` in the repository root installs that relay as a launch
+agent, so it starts at login and comes back if it dies.
+
+The relay is deliberately not the whole server. `balerion serve` has
+`/api/resolve`, which downloads whatever magnet it is handed, and exposing that
+to the internet would let anyone who guesses the URL fill your disk. The relay
+can search and nothing else: no resolve, no file reads, no sight of the torrent
+session. Every route needs a bearer token and there is no default one, so a
+relay started without a token refuses to start.
+
+Two variables point this deployment at it:
+
+```
+BALERION_RELAY_URL=https://your-machine.your-tailnet.ts.net
+BALERION_RELAY_TOKEN=...
+```
+
+Half a configuration counts as none. Without both, apibay searches answer `503`
+with a line saying so, and the Archive carries on working.
+
+## The category table lives in two places
+
+`lib/apibay.ts` carries the category table and the thin-line cap formula, ported
+from the `balerion-tpb` crate. The searching itself is no longer duplicated: it
+happens in the relay, and this file was cut from 314 lines to 139 when that
+became true, because a second implementation of the filtering that nothing calls
+is worse than none.
+
+What remains must still agree with the Rust. If the categories or the cap change
+there, change them here in the same commit. As of writing both produce an
+identical cap of 675,000,000 bytes for all-video and identical tallies for the
+same query.
+
+The table is kept here rather than fetched from the relay so the menus still
+render when your machine is asleep.
 
 ## Running it locally
 
