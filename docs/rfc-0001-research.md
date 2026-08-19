@@ -1,6 +1,6 @@
 # RFC-0001: Research dossier
 
-The founding research for balerin, preserved as written. Anything in it that we
+The founding research for balerion, preserved as written. Anything in it that we
 have since checked against the live site is corrected in
 [archive-org-notes.md](archive-org-notes.md); in particular **the scrape API's
 cursor pagination does not work anonymously**, so the "cursor-based, no depth
