@@ -37,6 +37,19 @@ pub enum PlayInfo {
         length: u64,
         tracks: Vec<Track>,
     },
+    /// Not yet. The file is still arriving and nothing can be said about it.
+    ///
+    /// Distinct from `Unsupported` on purpose, and the distinction matters more
+    /// than it looks: ffprobe has to read the head of the file, and on a fresh
+    /// torrent those bytes may not have landed. Reporting that as "this file
+    /// cannot be played, download it and use VLC" sends somebody away from a
+    /// perfectly good file thirty seconds before it would have worked.
+    NotReady {
+        reason: String,
+        /// So the page can show progress rather than an unchanging line.
+        pieces_have: usize,
+        pieces_total: usize,
+    },
     /// Needs converting. Drive MediaSource against the segment endpoints.
     Transcode {
         mime: String,
@@ -129,6 +142,22 @@ pub async fn info(
     let probe = match state.probe(&tools, &info_hash, file).await {
         Ok(probe) => probe,
         Err(err) => {
+            /* A probe that fails on a torrent still filling up has almost
+             * certainly failed for want of bytes rather than because the file is
+             * unplayable. Saying which costs one look at the piece map, and gets
+             * it right in the case that matters: a fresh torrent, where every
+             * probe fails until the head arrives. */
+            let stats = torrent.handle.stats();
+            if !stats.is_complete() {
+                return Ok(Json(PlayInfo::NotReady {
+                    reason: format!(
+                        "still waiting for the start of this file, which has to come off \
+                         the swarm before anything can be said about it ({err})"
+                    ),
+                    pieces_have: stats.pieces_have,
+                    pieces_total: stats.pieces_total,
+                }));
+            }
             return Ok(Json(PlayInfo::Unsupported {
                 reason: format!("could not read this file: {err}"),
                 download,

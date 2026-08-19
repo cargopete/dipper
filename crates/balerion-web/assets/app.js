@@ -50,6 +50,7 @@ const el = {
   castCopy: $("cast-copy"),
   library: $("library"),
   libraryList: $("library-list"),
+  duplicates: $("duplicates"),
   peers: $("t-peers"),
   rate: $("t-rate"),
   buffer: $("t-buffer"),
@@ -600,6 +601,21 @@ async function play(index) {
     return;
   }
 
+  /* Not yet, rather than never. Ask again, showing the piece count so the wait
+   * is visibly a wait rather than a page that has stopped.
+   *
+   * Guarded on `playing` so that changing file cancels it: without that, a
+   * retry armed for a file you have moved on from lands in three seconds and
+   * takes the player back. */
+  if (info.mode === "notready") {
+    const done = Math.round((info.pieces_have / Math.max(info.pieces_total, 1)) * 100);
+    showViewerNote(`${info.reason}. ${info.pieces_have} of ${info.pieces_total} pieces (${done}%).`);
+    window.setTimeout(() => {
+      if (playing === index) play(index);
+    }, 3000);
+    return;
+  }
+
   if (info.mode === "direct") {
     show(el.video, true);
     show(el.viewerNote, false);
@@ -838,8 +854,47 @@ function renderStats(stats) {
   }
 }
 
+/** `S01E02` out of a torrent name, the same shapes the server reads. */
+function episodeTagOf(name) {
+  const m =
+    /(?:^|[^a-z0-9])s(\d{1,2})[^a-z0-9]?e(\d{1,3})(?![0-9])/i.exec(name) ||
+    /(?:^|[^a-z0-9])(\d{1,2})x(\d{1,3})(?![0-9])/i.exec(name);
+  if (!m) return null;
+  const pad = (n) => String(Number(n)).padStart(2, "0");
+  return `S${pad(m[1])}E${pad(m[2])}`;
+}
+
+/* Three copies of the same episode do not download three times faster. They
+ * split the peers you have between them, and each one is slower than one would
+ * have been. That is easy to do by accident, invisible while it happens, and
+ * exactly what makes an evening of this feel broken. */
+function warnAboutDuplicates(all) {
+  const groups = new Map();
+  for (const item of all) {
+    const tag = episodeTagOf(item.name);
+    if (!tag) continue;
+    groups.set(tag, [...(groups.get(tag) ?? []), item]);
+  }
+  const duplicated = [...groups.entries()].filter(([, items]) => items.length > 1);
+  if (duplicated.length === 0) {
+    show(el.duplicates, false);
+    return;
+  }
+
+  const said = duplicated
+    .map(([tag, items]) => `${items.length} copies of ${tag}`)
+    .join(", ");
+  const peers = all.reduce((total, item) => total + item.peers, 0);
+  el.duplicates.textContent =
+    `${said} are running at once. They are not downloading in parallel: they are ` +
+    `sharing the ${peers} peers between them, so each is slower than one would be. ` +
+    `Delete the ones you are not watching.`;
+  show(el.duplicates, true);
+}
+
 function renderLibrary(all) {
   show(el.library, all.length > 0);
+  warnAboutDuplicates(all);
   el.libraryList.replaceChildren();
 
   for (const item of all) {

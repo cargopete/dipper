@@ -81,6 +81,25 @@ the tail. A front-to-back sequential picker never serves it and playback hangs
 forever. Letting the requests steer the picker handles both layouts, and makes
 seeking work for nothing.
 
+### Not yet, rather than never
+
+ffprobe has to read the head of a file before anything can be said about it, and
+on a fresh torrent those bytes have not arrived. That used to be reported as
+"this file cannot be played, download it and use VLC", which sends you away from
+a perfectly good file about thirty seconds before it would have worked.
+
+A probe that fails on a torrent still filling up now says so, with the piece
+count, and the page asks again every few seconds instead of giving up. The
+verdict only becomes "unsupported" once the torrent is complete and the file
+still cannot be read, which is the only time it is true.
+
+### One episode at a time
+
+Three copies of the same episode do not download three times faster: they share
+the peers you have between them, so each is slower than one would have been.
+That is easy to do by accident and invisible while it costs you. The library now
+says when it is happening, and how many peers are being split.
+
 ### Casting to a television
 
 ```sh
