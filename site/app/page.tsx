@@ -4,6 +4,34 @@ import { useCallback, useEffect, useState } from "react";
 
 type Option = { key: string; label: string; note: string; thinCap: number | null };
 
+type Show = {
+  id: number;
+  name: string;
+  premiered: string | null;
+  ended: string | null;
+  status: string | null;
+  genres: string[];
+  summary: string | null;
+  poster: string | null;
+};
+
+type Episode = {
+  id: number;
+  season: number;
+  number: number;
+  name: string;
+  airdate: string | null;
+  tag: string;
+};
+
+/* Punctuation dropped rather than escaped, the same rule the server uses:
+   release names put dots where the title had spaces, and a colon in
+   "Dune: Prophecy" matches nothing at all. */
+function apibayQuery(show: Show, suffix: string): string {
+  const title = show.name.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return `${title} ${suffix}`;
+}
+
 type IndexInfo = {
   key: "ia" | "tpb";
   label: string;
@@ -115,6 +143,15 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  /* The catalogue. Browsing is a separate mode rather than a third index,
+     because what it lists is titles rather than things you can fetch: a show is
+     not a torrent until an episode of it has been searched for. */
+  const [browsing, setBrowsing] = useState(true);
+  const [shows, setShows] = useState<Show[] | null>(null);
+  const [showTerms, setShowTerms] = useState("");
+  const [openShow, setOpenShow] = useState<Show | null>(null);
+  const [episodeList, setEpisodeList] = useState<Episode[] | null>(null);
+  const [season, setSeason] = useState(1);
   /* Remembered per browser rather than configured on the server: it describes
      the machine you are sitting at, and the server has no business knowing it. */
   const [local, setLocal] = useState(DEFAULT_LOCAL);
@@ -146,13 +183,72 @@ export default function Page() {
       .catch(() => setError("Could not load the indexes. Nothing will search until that does."));
   }, []);
 
-  const run = useCallback(
-    async (event?: React.FormEvent) => {
-      event?.preventDefault();
-      const entry = indexes.find((i) => i.key === index);
+  /* The opening shelf, once. A hand-picked list rather than a chart, because
+     TVmaze has no popularity endpoint and inventing a ranking would be a lie
+     told in a nice grid. */
+  useEffect(() => {
+    if (!browsing || shows !== null || showTerms) return;
+    fetch("/api/shows")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
+      .then((body: { shows: Show[] }) => setShows(body.shows))
+      .catch(() => setError("The catalogue is not answering."));
+  }, [browsing, shows, showTerms]);
+
+  async function findShows(event?: React.FormEvent) {
+    event?.preventDefault();
+    setError(null);
+    setOpenShow(null);
+    setEpisodeList(null);
+    try {
+      const query = showTerms.trim() ? `?q=${encodeURIComponent(showTerms.trim())}` : "";
+      const response = await fetch(`/api/shows${query}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error ?? `${response.status}`);
+      setShows(body.shows);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not reach the catalogue");
+    }
+  }
+
+  async function openShowDetail(show: Show) {
+    setOpenShow(show);
+    setEpisodeList(null);
+    setRows(null);
+    setError(null);
+    try {
+      const response = await fetch(`/api/shows?show=${show.id}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error ?? `${response.status}`);
+      setEpisodeList(body.episodes);
+      setSeason(body.episodes[0]?.season ?? 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not read that show");
+    }
+  }
+
+  /* The bridge: a title becomes a query, and from here on it is the ordinary
+     apibay search with everything that already does. Season packs are searched
+     for separately because they are named quite differently from episodes. */
+  function watchQuery(suffix: string) {
+    if (!openShow) return;
+    const query = apibayQuery(openShow, suffix);
+    setTerms(query);
+    setIndex("tpb");
+    setBrowsing(false);
+    void runWith(query, "tpb");
+  }
+
+  /* Takes its terms rather than reading them from state, because the catalogue
+     calls it in the same tick as setting them and state has not caught up. That
+     was a search for the empty string the first time round. */
+  const runWith = useCallback(
+    async (searchFor: string, forIndex: "ia" | "tpb" = index) => {
+      const entry = indexes.find((i) => i.key === forIndex);
       if (!entry) return;
       // The Archive browses on an empty query; apibay has no browse.
-      if (!terms.trim() && index === "tpb") return;
+      if (!searchFor.trim() && forIndex === "tpb") return;
+      const terms = searchFor;
+      const index = forIndex;
 
       setBusy(true);
       setError(null);
@@ -186,7 +282,15 @@ export default function Page() {
         setBusy(false);
       }
     },
-    [filter, index, indexes, terms, thin],
+    [filter, index, indexes, thin],
+  );
+
+  const run = useCallback(
+    async (event?: React.FormEvent) => {
+      event?.preventDefault();
+      await runWith(terms, index);
+    },
+    [runWith, terms, index],
   );
 
   /* Changing the index invalidates what is on screen: those results belong to
@@ -221,7 +325,150 @@ export default function Page() {
       </header>
 
       <main>
-        <section className="console">
+        <div className="modes" role="tablist" aria-label="How to find something">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={browsing ? "true" : "false"}
+            onClick={() => setBrowsing(true)}
+          >
+            Browse shows
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={browsing ? "false" : "true"}
+            onClick={() => setBrowsing(false)}
+          >
+            Search
+          </button>
+        </div>
+
+        {browsing ? (
+          <>
+            <section className="console">
+              <form onSubmit={findShows}>
+                <div className="search-row browse-row">
+                  <div className="field">
+                    <label htmlFor="showq">Find a show</label>
+                    <input
+                      id="showq"
+                      type="search"
+                      spellCheck={false}
+                      autoComplete="off"
+                      placeholder="a title, or leave it empty for the shelf"
+                      value={showTerms}
+                      onChange={(event) => setShowTerms(event.target.value)}
+                    />
+                  </div>
+                  <button type="submit">Find</button>
+                </div>
+              </form>
+              <p className="hint">
+                Titles come from TVmaze. Picking an episode searches apibay for it, which is
+                where everything below this point already goes.
+              </p>
+            </section>
+
+            {openShow ? (
+              <section className="show-detail">
+                {openShow.poster ? (
+                  <img src={openShow.poster} alt="" />
+                ) : (
+                  <div className="show-poster missing">no poster</div>
+                )}
+                <div>
+                  <h2>{openShow.name}</h2>
+                  <p className="show-meta">
+                    {[
+                      openShow.premiered?.slice(0, 4),
+                      openShow.status,
+                      openShow.genres.join(", "),
+                    ]
+                      .filter(Boolean)
+                      .join("  /  ")}
+                  </p>
+                  {openShow.summary ? (
+                    <p className="show-summary">{openShow.summary.slice(0, 320)}</p>
+                  ) : null}
+
+                  {episodeList === null ? (
+                    <p className="hint">Reading the episode list</p>
+                  ) : (
+                    <>
+                      <div className="season-row">
+                        {[...new Set(episodeList.map((e) => e.season))].map((n) => (
+                          <button
+                            key={n}
+                            type="button"
+                            className={n === season ? "button-small" : "button-small quiet"}
+                            onClick={() => setSeason(n)}
+                          >
+                            Season {n}
+                          </button>
+                        ))}
+                        {/* Packs are named quite differently from episodes, so
+                            they get their own search rather than being hoped for. */}
+                        <button
+                          type="button"
+                          className="button-small quiet"
+                          onClick={() => watchQuery(`season ${season}`)}
+                        >
+                          Whole season
+                        </button>
+                      </div>
+
+                      <ul className="episodes">
+                        {episodeList
+                          .filter((e) => e.season === season)
+                          .map((e) => (
+                            <li key={e.id}>
+                              <span className="episode-tag">{e.tag}</span>
+                              <span>{e.name}</span>
+                              <span className="episode-date">{e.airdate ?? ""}</span>
+                              <button
+                                type="button"
+                                className="button-small"
+                                onClick={() => watchQuery(e.tag)}
+                              >
+                                Find
+                              </button>
+                            </li>
+                          ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              </section>
+            ) : null}
+
+            {shows && !openShow ? (
+              <section aria-label="Shows">
+                <ul className="shows">
+                  {shows.map((show) => (
+                    <li key={show.id}>
+                      <button type="button" className="show" onClick={() => openShowDetail(show)}>
+                        {show.poster ? (
+                          <img className="show-poster" src={show.poster} alt="" loading="lazy" />
+                        ) : (
+                          <span className="show-poster missing">{show.name}</span>
+                        )}
+                        <span className="show-name">{show.name}</span>
+                        <span className="show-meta">
+                          {[show.premiered?.slice(0, 4), show.genres[0]]
+                            .filter(Boolean)
+                            .join("  /  ")}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+          </>
+        ) : null}
+
+        <section className="console" hidden={browsing}>
           <form onSubmit={run}>
             <div className="search-row">
               <div className="field">

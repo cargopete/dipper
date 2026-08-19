@@ -33,6 +33,29 @@ constant time. That is a modest bar and worth being honest about: it stops the
 phrase leaking through a cookie jar or a proxy log, and it is not authentication
 in any serious sense. One password shared by everyone who has it never is.
 
+## Browsing shows
+
+apibay has no browse at all: an empty query returns its no-results sentinel and
+there is no listing endpoint. So the catalogue needs a source of titles, and that
+is TVmaze, chosen because it needs no API key. Every key is one more secret
+somebody has to carry between two dashboards, and there are enough of those here
+already. Checked before being relied on: TVmaze answers a datacentre address with
+a `200`, from Hetzner and from Vercel alike, which apibay does not.
+
+The catalogue only ever produces *titles*. Picking an episode turns it into an
+ordinary apibay search through the relay, so everything downstream is unchanged.
+Punctuation is dropped rather than escaped when building that query, because
+release names put dots where the title had spaces and a colon in "Dune:
+Prophecy" matches nothing.
+
+The opening shelf is hand-picked. TVmaze has no popularity endpoint and its
+`weight` only ranks within whatever you already fetched, so there is nothing
+honest to sort by; a stated selection is better than an implied ranking. Search
+by title for anything not on it.
+
+Season packs get their own button, because they are named quite differently from
+episodes and hoping one search finds both finds neither.
+
 ## Two indexes, reached two different ways
 
 archive.org answers this deployment directly and needs nothing else running.
