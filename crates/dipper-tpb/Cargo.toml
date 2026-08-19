@@ -26,3 +26,4 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls-native-certs",
 ] }
 urlencoding = "2"
+html-escape = "0.2.15"

@@ -78,7 +78,12 @@ impl TryFrom<RawTorrent> for Hit {
         };
 
         let info_hash = raw.info_hash.to_uppercase();
-        let magnet = magnet::uri(&info_hash, &raw.name)
+        // apibay serves names HTML-escaped, so "español" arrives as
+        // "espa&ntilde;ol". Decoded here, once, before anything else sees it:
+        // the name goes on the page as text and into the magnet's display
+        // name, and both would otherwise carry the entity through verbatim.
+        let name = html_escape::decode_html_entities(&raw.name).into_owned();
+        let magnet = magnet::uri(&info_hash, &name)
             .ok_or_else(|| unusable("no usable infohash, so no magnet"))?;
         let category: u32 = raw.category.parse().unwrap_or(0);
 
@@ -90,7 +95,7 @@ impl TryFrom<RawTorrent> for Hit {
                 .map_err(|_| unusable("size is not a number"))?,
             magnet,
             info_hash,
-            name: raw.name,
+            name,
             // These are decoration. A missing seeder count is worth showing as
             // zero; it is not worth throwing away an otherwise good result.
             seeders: raw.seeders.parse().unwrap_or(0),
@@ -180,6 +185,22 @@ mod tests {
         // resolve, thirty seconds later, looking like a bug in the engine.
         let json = ROW.replace("31a5ea99284b3603e94ef861311b6bb29345c6d2", "");
         assert!(Hit::try_from(raw(&json).pop().unwrap()).is_err());
+    }
+
+    #[test]
+    fn html_entities_in_a_name_are_decoded() {
+        // Observed live. Rendered as text an entity shows up literally, which
+        // looks like our bug rather than theirs.
+        let json = ROW.replace(
+            "Some.Film.1080p.BluRay.x265",
+            "game of thrones s01E01 espa&ntilde;ol latino &amp; more",
+        );
+        let hit = Hit::try_from(raw(&json).pop().unwrap()).unwrap();
+        assert_eq!(hit.name, "game of thrones s01E01 español latino & more");
+        // And the decoded ampersand must still be encoded into the magnet, or
+        // the display name grows a parameter of the uploader's choosing.
+        assert!(hit.magnet.contains("%26"), "{}", hit.magnet);
+        assert!(!hit.magnet.contains("&ntilde"), "{}", hit.magnet);
     }
 
     #[test]
