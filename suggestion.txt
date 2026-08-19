@@ -1,0 +1,35 @@
+Here's the cleanest, copy-paste-ready way to run that search via
+CLI and get a human-readable output:
+
+### ✅ Best Method: `curl` + `jq`
+**Prerequisites:** You need `curl` (usually preinstalled) and
+`jq` (a JSON parser).
+Install `jq`: `sudo apt install jq` (Debian/Ubuntu/macOS), or
+`brew install jq`
+
+```bash
+curl -sL -H "User-Agent: Mozilla/5.0" \
+  "https://thepiratebay.org/json.php?q=game+of+thrones&all=on&pag"https://thepiratebay.org/json.php?q=game+of+thrones&all=on&page=0" | \
+jq '[.[] | {name, magnet, seeder, leecher, size_mb: (.filesize /
+1024 / 1024 * 100 | round) / 100}]'
+```
+
+### 🔍 What this does:
+- `-sL` → Silent output + follow redirects (handles TPB's CDN
+routing)
+- `-H "User-Agent: ..."` → Bypasses basic bot detection on some
+networks
+- `jq '[.[] | {name, magnet, seeder, leecher, size_mb:...}]'` →
+Extracts only the fields you care about and converts bytes to MB
+
+### 📤 Expected Output:
+```json
+[
+  {
+    "name": "Game of Thrones S01E01 Winter Is Coming 1080p
+WEB-DL DD5.1 H264",
+    "magnet": "magnet:?xt=urn:btih:A1B2C3D4...&dn=...",
+    "seeder": 1452,
+    "leecher": 89,
+    "size_mb": 2.47
+  },`
