@@ -366,6 +366,17 @@ impl Tools {
             format!("{start}"),
             "-i".into(),
             url.into(),
+            // MKVs carry chapters, and the MP4 muxer writes them as a third
+            // track with a text handler, which nothing asked for. `-map` does
+            // not exclude it because it is not a stream being mapped.
+            //
+            // It matters because iOS expects a fragmented MP4's init to
+            // describe exactly the tracks the segments carry. With the extra
+            // track Safari accepts the playlist, fetches the segments, and sits
+            // at 0:00 without an error. Measured: three trak boxes without this,
+            // two with.
+            "-map_chapters".into(),
+            "-1".into(),
             "-t".into(),
             format!("{SEGMENT_SECONDS}"),
         ];
