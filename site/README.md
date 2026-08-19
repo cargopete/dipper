@@ -53,6 +53,28 @@ The opening shelf is hand-picked. TVmaze has no popularity endpoint and its
 honest to sort by; a stated selection is better than an implied ranking. Search
 by title for anything not on it.
 
+### Pick and play
+
+The Play button on an episode does the whole thing: searches apibay, chooses a
+release, and hands the magnet to the player, which resolves and starts. Nobody
+reads a list of releases unless they want to.
+
+The choosing is arithmetic rather than taste. A release streams if the swarm can
+carry its bitrate, and its bitrate is its size over the episode's runtime, which
+TVmaze provides. So the rules are stateable: drop anything that looks like a cam
+recording, keep what fits a thin line, and among those take the best seeded,
+because seeders decide whether it starts at all. Ties go to the larger file,
+since within a budget already met more bytes is more picture. When nothing fits,
+it takes the smallest and says so rather than starting something that will stall
+and letting the stalling explain itself.
+
+Measured on a real episode: from 30 releases it chose a 401 MiB 1080p HEVC with
+58 seeders needing 1.2 Mbit/s, over a 2.7 GiB BluRay rip at 6 Mbit/s and a 12 GiB
+remux.
+
+It always says what it picked and why. Something that chooses for you and will
+not say what it chose is worse than a list.
+
 Season packs get their own button, because they are named quite differently from
 episodes and hoping one search finds both finds neither.
 

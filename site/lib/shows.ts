@@ -34,6 +34,8 @@ export type Episode = {
   number: number;
   name: string;
   airdate: string | null;
+  /** Minutes. What makes a release's bitrate computable rather than guessed. */
+  runtime: number | null;
   /** `S01E03`, the form a release name uses. */
   tag: string;
 };
@@ -145,6 +147,7 @@ export async function episodes(showId: number): Promise<Episode[]> {
       number: Number(entry.number),
       name: String(entry.name ?? ""),
       airdate: (entry.airdate as string) || null,
+      runtime: Number(entry.runtime) || null,
       tag: `S${pad(Number(entry.season))}E${pad(Number(entry.number))}`,
     }));
 }

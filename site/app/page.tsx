@@ -21,7 +21,18 @@ type Episode = {
   number: number;
   name: string;
   airdate: string | null;
+  runtime: number | null;
   tag: string;
+};
+
+type Pick = {
+  magnet: string;
+  name: string;
+  sizeBytes: number;
+  seeders: number;
+  rate: string;
+  overBudget: boolean;
+  considered: number;
 };
 
 /* Punctuation dropped rather than escaped, the same rule the server uses:
@@ -152,6 +163,11 @@ export default function Page() {
   const [openShow, setOpenShow] = useState<Show | null>(null);
   const [episodeList, setEpisodeList] = useState<Episode[] | null>(null);
   const [season, setSeason] = useState(1);
+  /* Pick and play: the episode being fetched, and what was chosen for it. Kept
+     visible rather than silent, because something that chooses for you and will
+     not say what it chose is worse than a list. */
+  const [picking, setPicking] = useState<number | null>(null);
+  const [picked, setPicked] = useState<{ episode: Episode; choice: Pick } | null>(null);
   /* Remembered per browser rather than configured on the server: it describes
      the machine you are sitting at, and the server has no business knowing it. */
   const [local, setLocal] = useState(DEFAULT_LOCAL);
@@ -232,6 +248,35 @@ export default function Page() {
       setSeason(body.episodes[0]?.season ?? 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not read that show");
+    }
+  }
+
+  /* Pick and play. One tap: search, choose, and hand the magnet straight to the
+     player, without anyone reading a list of releases.
+     
+     The choosing is arithmetic rather than taste: a release streams if the swarm
+     can carry its bitrate, and its bitrate is its size over the episode's
+     runtime, which the catalogue knows. */
+  async function playEpisode(episode: Episode) {
+    if (!openShow) return;
+    setPicking(episode.id);
+    setPicked(null);
+    setError(null);
+    try {
+      const query = new URLSearchParams({
+        q: apibayQuery(openShow, episode.tag),
+        runtime: String(episode.runtime ?? 45),
+      });
+      const response = await fetch(`/api/pick?${query}`);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error ?? `${response.status}`);
+      setPicked({ episode, choice: body as Pick });
+      // Straight to the player, which resolves and starts on its own.
+      window.open(watchHere(local, body.magnet), "balerion");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not find anything to play");
+    } finally {
+      setPicking(null);
     }
   }
 
@@ -427,6 +472,18 @@ export default function Page() {
                         </button>
                       </div>
 
+                      {picked ? (
+                        <p className={picked.choice.overBudget ? "hint hint-caution" : "hint"}>
+                          <strong>{picked.episode.tag}</strong>: picked{" "}
+                          <code>{picked.choice.name}</code> from {picked.choice.considered}{" "}
+                          releases. {bytes(picked.choice.sizeBytes)}, {picked.choice.seeders}{" "}
+                          seeders, needs {picked.choice.rate}.
+                          {picked.choice.overBudget
+                            ? " Nothing found fits a thin line, so this is the smallest there was and it may stall."
+                            : " Opening it in the player."}
+                        </p>
+                      ) : null}
+
                       <ul className="episodes">
                         {episodeList
                           .filter((e) => e.season === season)
@@ -435,13 +492,24 @@ export default function Page() {
                               <span className="episode-tag">{e.tag}</span>
                               <span>{e.name}</span>
                               <span className="episode-date">{e.airdate ?? ""}</span>
-                              <button
-                                type="button"
-                                className="button-small"
-                                onClick={() => watchQuery(e.tag)}
-                              >
-                                Find
-                              </button>
+                              <span className="row-actions">
+                                <button
+                                  type="button"
+                                  className="button-small"
+                                  disabled={picking === e.id}
+                                  onClick={() => playEpisode(e)}
+                                >
+                                  {picking === e.id ? "Finding" : "Play"}
+                                </button>
+                                {/* For when you want to choose yourself. */}
+                                <button
+                                  type="button"
+                                  className="button-small quiet"
+                                  onClick={() => watchQuery(e.tag)}
+                                >
+                                  Releases
+                                </button>
+                              </span>
                             </li>
                           ))}
                       </ul>

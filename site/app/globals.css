@@ -393,6 +393,7 @@ input::placeholder { color: var(--ink-faint); }
   .show-detail { grid-template-columns: 1fr; }
   .show-detail img { max-width: 9rem; }
   .episodes li { grid-template-columns: 4rem 1fr auto; }
+  .episodes .row-actions { flex-direction: column; align-items: stretch; }
   .episode-date { display: none; }
 }
 
