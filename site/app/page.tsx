@@ -40,7 +40,13 @@ const DEFAULT_LOCAL = "http://127.0.0.1:8080";
  * browser: not into that server's log, not into a proxy's, not into a Referer.
  */
 function watchHere(base: string, open: string): string {
-  return `${base.replace(/\/+$/, "")}/#magnet=${encodeURIComponent(open)}`;
+  /* Guarded, because an unusable base produces a link that looks fine and does
+     something quite different. With an empty base this built "/#magnet=...",
+     which is a fragment on *this* page: clicking it scrolls to the top and
+     nothing else happens, and there is nothing on screen to say why. */
+  const trimmed = base.trim().replace(/\/+$/, "");
+  const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
+  return `${usable}/#magnet=${encodeURIComponent(open)}`;
 }
 
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -121,7 +127,13 @@ export default function Page() {
 
   function rememberLocal(value: string) {
     setLocal(value);
-    window.localStorage.setItem("balerion.local", value);
+    /* A blank or half-typed value is not worth remembering, and remembering one
+       would outlive the moment it was typed in. */
+    if (/^https?:\/\/[^/]+$/.test(value.trim())) {
+      window.localStorage.setItem("balerion.local", value.trim());
+    } else {
+      window.localStorage.removeItem("balerion.local");
+    }
   }
 
   const chosenIndex = indexes.find((entry) => entry.key === index);
@@ -349,17 +361,19 @@ export default function Page() {
                     </span>
                     <span className="result-size">{bytes(row.sizeBytes)}</span>
                     <span className="row-actions">
+                      {/* A named target so the first Watch opens a Balerion tab
+                          and every one after it reuses that tab. Deliberately no
+                          `rel`: per the HTML spec, `noopener` (which `noreferrer`
+                          implies) makes the browser ignore the target name and
+                          open a fresh context every time, which defeats the whole
+                          point. The target is our own page on loopback, and the
+                          magnet rides in the fragment, which is never sent as a
+                          Referer, so there is nothing here for `rel` to protect. */}
                       <a
                         className="button-small"
                         href={watchHere(local, row.copy ?? "")}
-                        /* A named target rather than _blank: the first Watch
-                           opens a Balerion tab and every one after it reuses
-                           that same tab, instead of leaving a row of them
-                           behind. The player listens for the fragment changing
-                           as well as for load, which is what makes reuse work. */
                         target="balerion"
-                        rel="noreferrer noopener"
-                        title={`Opens the Balerion running at ${local}`}
+                        title={`Opens ${watchHere(local, row.copy ?? "")}`}
                       >
                         Watch
                       </a>
