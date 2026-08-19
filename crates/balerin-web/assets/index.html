@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>balerin</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231e5aa8'/><rect x='3' y='7' width='10' height='2' fill='white'/></svg>">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <p class="brand">BALERIN</p>
+  <p class="masthead-note">
+    <span>leeching only</span>
+    <span aria-hidden="true">/</span>
+    <span>nothing is uploaded</span>
+  </p>
+</header>
+
+<main id="main">
+
+  <section class="intake" aria-labelledby="intake-heading">
+    <h1 id="intake-heading" class="visually-hidden">Find something to watch</h1>
+
+    <div class="modes" role="tablist" aria-label="How to find something">
+      <button type="button" role="tab" id="mode-search" aria-selected="true"
+              aria-controls="panel-search" data-mode="search">Search</button>
+      <button type="button" role="tab" id="mode-link" aria-selected="false"
+              aria-controls="panel-link" data-mode="link">Paste a link</button>
+    </div>
+
+    <form id="search-form" role="tabpanel" aria-labelledby="mode-search" novalidate>
+      <div class="search-row">
+        <div class="field">
+          <label for="query">Search for</label>
+          <input
+            id="query"
+            name="query"
+            type="search"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="atomic, cartoons, noir, anything"
+            aria-describedby="filter-note source-note">
+        </div>
+        <div class="field field-narrow">
+          <label for="source">Index</label>
+          <select id="source">
+            <option value="ia">Internet Archive</option>
+            <option value="tpb">apibay</option>
+          </select>
+        </div>
+        <div class="field field-narrow">
+          <!-- Relabelled with the source: one index has collections, the other
+               has categories, and calling both "filter" would help nobody. -->
+          <label for="filter" id="filter-label">Collection</label>
+          <select id="filter"></select>
+        </div>
+        <button type="submit" id="search-submit">Search</button>
+      </div>
+      <label class="toggle toggle-inline" id="thin-row" hidden>
+        <input type="checkbox" id="thin">
+        <span id="thin-label">Fits a thin line</span>
+      </label>
+      <p class="hint" id="filter-note"></p>
+      <p class="hint hint-caution" id="source-note" hidden></p>
+    </form>
+
+    <form id="intake-form" role="tabpanel" aria-labelledby="mode-link" novalidate hidden>
+      <label for="magnet">Magnet link, infohash, or archive.org identifier</label>
+      <div class="intake-row">
+        <input
+          id="magnet"
+          name="magnet"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          autocapitalize="off"
+          placeholder="magnet:?xt=urn:btih:..."
+          aria-describedby="intake-hint">
+        <button type="submit" id="intake-submit">Resolve</button>
+      </div>
+      <p class="hint" id="intake-hint">
+        A magnet gets its file list from the swarm, so a cold one takes a few seconds.
+        An archive.org identifier skips that and fetches the torrent directly.
+      </p>
+    </form>
+  </section>
+
+  <section id="results" hidden aria-labelledby="results-heading">
+    <div class="results-head">
+      <h2 id="results-heading">Results</h2>
+      <p class="results-count" id="results-count"></p>
+    </div>
+    <ul id="result-list"></ul>
+  </section>
+
+  <!-- Shaped like the thing it stands in for, so the page does not jump when
+       the real content lands. -->
+  <section id="pending" class="stage" hidden aria-live="polite">
+    <div class="viewer skeleton-block">
+      <p class="viewer-note" id="pending-note">Looking for peers</p>
+    </div>
+    <aside class="telemetry">
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+    </aside>
+  </section>
+
+  <section id="failure" class="notice notice-bad" hidden role="alert">
+    <p class="notice-title">That did not work</p>
+    <p class="notice-body" id="failure-body"></p>
+  </section>
+
+  <section id="torrent" hidden aria-labelledby="torrent-name">
+    <div class="torrent-head">
+      <h2 id="torrent-name"></h2>
+      <div class="torrent-actions">
+        <label class="toggle">
+          <input type="checkbox" id="keep">
+          <span>Keep offline</span>
+        </label>
+        <button type="button" id="discard" class="button-quiet">Delete</button>
+      </div>
+    </div>
+    <p class="torrent-meta" id="torrent-meta"></p>
+
+    <div class="stage">
+      <div class="viewer" id="viewer">
+        <video id="video" controls playsinline preload="metadata"></video>
+        <p class="viewer-note" id="viewer-note" hidden></p>
+      </div>
+
+      <aside class="telemetry" aria-label="Download telemetry">
+        <dl>
+          <div class="reading"><dt>Peers</dt><dd id="t-peers">0</dd></div>
+          <div class="reading"><dt>Rate</dt><dd id="t-rate">0 B/s</dd></div>
+          <div class="reading"><dt>Buffer</dt><dd id="t-buffer">0 s</dd></div>
+          <div class="reading"><dt>Pieces</dt><dd id="t-pieces">0 / 0</dd></div>
+          <div class="reading"><dt>On disk</dt><dd id="t-disk">0 B</dd></div>
+        </dl>
+      </aside>
+    </div>
+
+    <p class="advisory" id="advisory" hidden role="status"></p>
+
+    <figure class="piecemap">
+      <canvas id="piecemap" height="28"></canvas>
+      <figcaption>
+        <span class="key"><span class="swatch swatch-have"></span>on disk</span>
+        <span class="key"><span class="swatch swatch-want"></span>not yet</span>
+        <span class="key"><span class="swatch swatch-head"></span>playhead</span>
+        <span class="piecemap-status" id="piecemap-status" role="status"></span>
+      </figcaption>
+    </figure>
+
+    <div class="files">
+      <h3>Files</h3>
+      <ul id="file-list"></ul>
+    </div>
+  </section>
+
+  <section id="library" hidden aria-labelledby="library-heading">
+    <h2 id="library-heading">On this machine</h2>
+    <p class="hint">
+      Streaming writes verified pieces to disk, so anything you watch is downloaded too.
+      Torrents you have not kept are removed once nobody has watched them for fifteen minutes.
+    </p>
+    <ul id="library-list"></ul>
+  </section>
+
+</main>
+
+<footer class="colophon">
+  <p>balerin runs on your machine. Nothing here is sent to anyone else.</p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

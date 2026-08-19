@@ -1,10 +1,10 @@
-# dipper
+# balerin
 
-[![CI](https://github.com/cargopete/dipper/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/dipper/actions/workflows/ci.yml)
+[![CI](https://github.com/cargopete/balerin/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/balerin/actions/workflows/ci.yml)
 
 A single-binary BitTorrent client that will also go and find something to watch.
-Named after the white-throated dipper, a small brown bird that walks into rivers
-and comes back out with things.
+Named for Balerion, who went and fetched things without asking permission
+first.
 
 The engine takes a magnet link, a `.torrent`, or an archive.org identifier and
 produces verified bytes on disk. It is deliberately provenance-agnostic: below
@@ -13,13 +13,13 @@ the CLI it knows only a 20-byte infohash and has no idea where you got it.
 ## Install
 
 ```sh
-cargo install --path crates/dipper-cli
+cargo install --path crates/balerin-cli
 ```
 
 ## Watch things in a browser
 
 ```sh
-dipper serve
+balerin serve
 ```
 
 Opens a local player at `http://127.0.0.1:8080`. Paste a magnet, an infohash,
@@ -28,7 +28,7 @@ seconds rather than after the download finishes.
 
 That third option matters more than it looks. archive.org's trackers reject
 third-party seeding, so its swarms have no peers to ask for a file list, and a
-magnet alone cannot resolve. dipper fetches the derived `.torrent` over HTTPS
+magnet alone cannot resolve. balerin fetches the derived `.torrent` over HTTPS
 instead, which is what makes the Archive's public domain film collections
 usable here at all.
 
@@ -52,7 +52,7 @@ swallowed.
 
 The search box has a "fits a thin line" toggle, and it is a size filter rather
 than anything to do with the transcoder. Transcoding cannot help here: ffmpeg
-reads the source back through dipper's own range endpoint, so every byte of a
+reads the source back through balerin's own range endpoint, so every byte of a
 2.7 GiB episode is fetched from the swarm whatever resolution comes out of the
 other end. The only way to need fewer bytes is to pick a smaller release, and
 that decision belongs in the search results.
@@ -66,13 +66,13 @@ one search every result is the same programme at a different bitrate, so sizes
 rank exactly as bitrates do.
 
 Two honest limitations. The cap measures the whole torrent, so a season pack is
-excluded even though dipper would only fetch the episode you played. And with
+excluded even though balerin would only fetch the episode you played. And with
 the cap on, the HD categories are usually empty, which is the true answer rather
 than a bug: no 1080p release of anything streams on 1.5 Mbit/s.
 
 What is on the other end is a public index of whatever strangers uploaded. Most
 of it is copyrighted, none of it is cleared, and the category is not a licence.
-dipper says so under the search box rather than in a comment nobody reads.
+balerin says so under the search box rather than in a comment nobody reads.
 
 The trick is that the browser's `Range` requests drive which pieces the engine
 fetches next. That matters more than it sounds: plenty of MP4s keep their
@@ -92,14 +92,14 @@ program stream carrying MPEG-2 video and AC-3 audio: three layers, none of
 which any browser opens, and all of it public domain.
 
 Conversion is on demand and stateless. Each six second segment is a fresh
-ffmpeg reading dipper's own range endpoint over HTTP, which means the piece
+ffmpeg reading balerin's own range endpoint over HTTP, which means the piece
 picker steers for it with no extra plumbing, and seeking anywhere costs one
 segment rather than restarting a session. Streams already in a browser-friendly
 codec are copied rather than re-encoded, so an H.264 MKV is only rewrapped.
 Hardware encoding is used where available (VideoToolbox on macOS), `libx264`
 otherwise.
 
-Without ffmpeg, dipper behaves as it always did: those files are listed with an
+Without ffmpeg, balerin behaves as it always did: those files are listed with an
 explanation and a download link. Transcoding is an enhancement, not a
 requirement, and the binary still works on its own.
 
@@ -115,7 +115,7 @@ offline** to stop that and fetch the whole thing.
 
 Serving flags: `--port`, `--host`, `-o <dir>`, `--low-bandwidth`.
 
-`--low-bandwidth` is worth knowing about. dipper normally keeps a quarter of a
+`--low-bandwidth` is worth knowing about. balerin normally keeps a quarter of a
 megabyte of requests outstanding per peer, which across thirty peers is a lot
 of other people's blocks queued in front of the piece your player is stalled
 on. The flag winds both figures down: less peak throughput, much shorter queue.
@@ -123,7 +123,7 @@ on. The flag winds both figures down: less peak throughput, much shorter queue.
 ## Search and fetch in one go
 
 ```sh
-dipper get "dawn chorus birdsong"
+balerin get "dawn chorus birdsong"
 ```
 
 ```
@@ -143,22 +143,22 @@ offered, since there is nothing to fetch otherwise.
 
 ```sh
 # an arbitrary magnet link
-dipper download "magnet:?xt=urn:btih:481b6e...071e&tr=http://bttracker.debian.org:6969/announce"
+balerin download "magnet:?xt=urn:btih:481b6e...071e&tr=http://bttracker.debian.org:6969/announce"
 
 # a .torrent on disk
-dipper download ./debian-13.6.0-amd64-netinst.iso.torrent -o ~/Downloads
+balerin download ./debian-13.6.0-amd64-netinst.iso.torrent -o ~/Downloads
 
 # an archive.org item, by identifier
-dipper download nasa -o ~/Downloads
+balerin download nasa -o ~/Downloads
 
 # see what a magnet actually is, without downloading it
-dipper resolve "magnet:?xt=urn:btih:481b6e...071e"
+balerin resolve "magnet:?xt=urn:btih:481b6e...071e"
 ```
 
 Interrupt a download and run it again: it picks up where it stopped. A resume
 file next to the download records which pieces verified, so a restart does not
 mean re-reading the lot. It is only trusted when it was written cleanly; after
-a kill -9 dipper falls back to re-hashing, and `--verify` forces that anyway.
+a kill -9 balerin falls back to re-hashing, and `--verify` forces that anyway.
 
 Engine flags: `--no-dht`, `--no-webseeds`, `--port`, `--max-peers`,
 `--dht-seconds`, `--verify`, `--quiet`.
@@ -167,19 +167,19 @@ Engine flags: `--no-dht`, `--no-webseeds`, `--port`, `--max-peers`,
 
 ```sh
 # harvest search results into a local index (fast, no network after this)
-dipper harvest --torrents-only --mediatype audio "field recordings" -n 2000
+balerin harvest --torrents-only --mediatype audio "field recordings" -n 2000
 
 # search the local catalogue
-dipper search "dawn chorus" -n 10
-dipper search "mediatype:audio AND has_torrent:true" --json
+balerin search "dawn chorus" -n 10
+balerin search "mediatype:audio AND has_torrent:true" --json
 
 # or skip the catalogue and ask archive.org
-dipper search --remote --torrents-only "apollo 11" -n 20
+balerin search --remote --torrents-only "apollo 11" -n 20
 
-dipper info nasa --files
-dipper magnet nasa
-dipper torrent nasa --show
-dipper index stats
+balerin info nasa --files
+balerin magnet nasa
+balerin torrent nasa --show
+balerin index stats
 ```
 
 Global flags: `--index-dir`, `--min-interval` (ms between archive.org
@@ -208,7 +208,7 @@ of the file, then the rest of that file. The rest of the torrent comes last, and
 only for torrents you asked to keep, so a 900 MB extras track cannot compete
 with the film you are watching.
 Every piece is SHA-1 verified before it is written, whether it came from a peer
-or a webseed. Uploading is not implemented: dipper leeches, and says so.
+or a webseed. Uploading is not implemented: balerin leeches, and says so.
 
 ## The magnet bootstrap
 
@@ -232,18 +232,18 @@ feeds it a lying peer.
 
 | crate | what it does |
 | --- | --- |
-| `dipper-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
-| `dipper-ia` | archive.org client: metadata API, search |
-| `dipper-tpb` | apibay client: search, and magnets built from the infohash |
-| `dipper-index` | local tantivy catalogue over harvested metadata |
-| `dipper-web` | the local player: range-driven streaming, on-demand transcoding, page embedded in the binary |
-| `dipper-cli` | the `dipper` binary |
+| `balerin-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
+| `balerin-ia` | archive.org client: metadata API, search |
+| `balerin-tpb` | apibay client: search, and magnets built from the infohash |
+| `balerin-index` | local tantivy catalogue over harvested metadata |
+| `balerin-web` | the local player: range-driven streaming, on-demand transcoding, page embedded in the binary |
+| `balerin-cli` | the `balerin` binary |
 
 ## Tests
 
 ```sh
 cargo test --workspace                                  # offline, fast
-cargo test -p dipper-ia -- --ignored --test-threads=1   # hits archive.org
+cargo test -p balerin-ia -- --ignored --test-threads=1   # hits archive.org
 ```
 
 The offline suite includes a fake peer that serves metadata over BEP 9, and a
@@ -259,14 +259,14 @@ the SHA-1 path.
   load, and derived `.torrent` files go stale.
 - Webseeds answer `200` with the whole file when a range covers all of it,
   rather than `206`. Refusing anything but `206` means never downloading a
-  small file. dipper slices the body itself.
+  small file. balerin slices the body itself.
 - archive.org's trackers reject third-party seeding, so its swarms are
-  effectively webseed-only. `dipper download <identifier>` gets everything over
+  effectively webseed-only. `balerin download <identifier>` gets everything over
   HTTP and never sees a peer.
 - apibay never answers an empty search with `[]`. It returns a single row with
   id `0` and a name of "No results returned", which parses perfectly and renders
   as an entirely convincing fake result. It also has no browse: an empty query
-  gets the same sentinel, so dipper refuses one rather than reporting that
+  gets the same sentinel, so balerin refuses one rather than reporting that
   nothing matched.
 
 ## Licence

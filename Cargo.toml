@@ -6,15 +6,15 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/cargopete/dipper"
+repository = "https://github.com/cargopete/balerin"
 rust-version = "1.85"
 
 [workspace.dependencies]
-dipper-bt = { path = "crates/dipper-bt", version = "0.1.0" }
-dipper-ia = { path = "crates/dipper-ia", version = "0.1.0" }
-dipper-index = { path = "crates/dipper-index", version = "0.1.0" }
-dipper-tpb = { path = "crates/dipper-tpb", version = "0.1.0" }
-dipper-web = { path = "crates/dipper-web", version = "0.1.0" }
+balerin-bt = { path = "crates/balerin-bt", version = "0.1.0" }
+balerin-ia = { path = "crates/balerin-ia", version = "0.1.0" }
+balerin-index = { path = "crates/balerin-index", version = "0.1.0" }
+balerin-tpb = { path = "crates/balerin-tpb", version = "0.1.0" }
+balerin-web = { path = "crates/balerin-web", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"

@@ -197,6 +197,113 @@ dependencies = [
 ]
 
 [[package]]
+name = "balerin-bt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "data-encoding",
+ "futures-util",
+ "hex",
+ "mainline",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_bencode",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "balerin-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "balerin-bt",
+ "balerin-ia",
+ "balerin-index",
+ "balerin-web",
+ "clap",
+ "directories",
+ "indicatif",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "balerin-ia"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "balerin-bt",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
+name = "balerin-index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "tantivy",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "balerin-tpb"
+version = "0.1.0"
+dependencies = [
+ "html-escape",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "balerin-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "balerin-bt",
+ "balerin-ia",
+ "balerin-tpb",
+ "directories",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -604,113 +711,6 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
-]
-
-[[package]]
-name = "dipper-bt"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "data-encoding",
- "futures-util",
- "hex",
- "mainline",
- "rand",
- "reqwest",
- "serde",
- "serde_bencode",
- "sha1",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
- "urlencoding",
-]
-
-[[package]]
-name = "dipper-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dipper-bt",
- "dipper-ia",
- "dipper-index",
- "dipper-web",
- "directories",
- "indicatif",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dipper-ia"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dipper-bt",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "url",
- "urlencoding",
-]
-
-[[package]]
-name = "dipper-index"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "tantivy",
- "tempfile",
- "thiserror 2.0.19",
- "tracing",
-]
-
-[[package]]
-name = "dipper-tpb"
-version = "0.1.0"
-dependencies = [
- "html-escape",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "urlencoding",
-]
-
-[[package]]
-name = "dipper-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "dipper-bt",
- "dipper-ia",
- "dipper-tpb",
- "directories",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "tokio",
- "tracing",
 ]
 
 [[package]]
