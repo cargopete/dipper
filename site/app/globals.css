@@ -140,6 +140,34 @@ button[disabled] {
   min-width: 8.5rem;
 }
 .button-small:hover { background: var(--accent); color: var(--accent-ink); }
+/* Two actions per row, so they get a box of their own rather than each claiming
+   a grid column and squeezing the title. */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+/* Watch is the primary of the two; Copy is the fallback for when there is no
+   Balerion on this machine to open. Same shape, less ink. */
+.button-small.quiet {
+  color: var(--ink-soft);
+  border-color: var(--rule-strong);
+}
+.button-small.quiet:hover {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+
+/* An anchor styled as a button still needs to sit like one. */
+a.button-small {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .button-small.done {
   border-color: var(--good);
   color: var(--good);
@@ -180,9 +208,12 @@ input::placeholder { color: var(--ink-faint); }
   padding: 1.4rem 1.5rem 1.5rem;
 }
 
+/* Four children now: query, index, filter, button. Leaving this at three
+   columns wrapped the button onto a line of its own, full width, looking like a
+   deliberate choice nobody made. */
 .search-row {
   display: grid;
-  grid-template-columns: 1fr 13rem auto;
+  grid-template-columns: 1fr 11rem 13rem auto;
   align-items: end;
   gap: 0.7rem;
 }

@@ -21,10 +21,27 @@ type Row = {
   meta: (string | null)[];
   sizeBytes: number | null;
   swarm: { seeders: number; leechers: number } | null;
-  /** What gets copied, or a link to open when there is nothing to copy. */
+  /** What gets copied: a magnet, or an archive.org identifier. */
   copy: string | null;
+  /** Where to read more about it, when the index offers such a place. */
   href: string | null;
 };
+
+/** Where a local Balerion is expected to be listening. */
+const DEFAULT_LOCAL = "http://127.0.0.1:8080";
+
+/**
+ * A link that opens whatever Balerion is running on the machine you are reading
+ * this on, with the thing already chosen.
+ *
+ * A top-level navigation from an https page to 127.0.0.1 is allowed, which is
+ * what makes this possible at all; a fetch to the same address would not be.
+ * The magnet goes in the fragment rather than the query so it never leaves the
+ * browser: not into that server's log, not into a proxy's, not into a Referer.
+ */
+function watchHere(base: string, open: string): string {
+  return `${base.replace(/\/+$/, "")}/#magnet=${encodeURIComponent(open)}`;
+}
 
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
 
@@ -89,6 +106,20 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  /* Remembered per browser rather than configured on the server: it describes
+     the machine you are sitting at, and the server has no business knowing it. */
+  const [local, setLocal] = useState(DEFAULT_LOCAL);
+  const [showLocal, setShowLocal] = useState(false);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("balerion.local");
+    if (saved) setLocal(saved);
+  }, []);
+
+  function rememberLocal(value: string) {
+    setLocal(value);
+    window.localStorage.setItem("balerion.local", value);
+  }
 
   const chosenIndex = indexes.find((entry) => entry.key === index);
   const chosenOption = chosenIndex?.options.find((option) => option.key === filter);
@@ -314,13 +345,26 @@ export default function Page() {
                       ) : null}
                     </span>
                     <span className="result-size">{bytes(row.sizeBytes)}</span>
-                    <button
-                      type="button"
-                      className={copied === row.key ? "button-small done" : "button-small"}
-                      onClick={() => copy(row)}
-                    >
-                      {copied === row.key ? "Copied" : copyLabel}
-                    </button>
+                    <span className="row-actions">
+                      <a
+                        className="button-small"
+                        href={watchHere(local, row.copy ?? "")}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        title={`Opens the Balerion running at ${local}`}
+                      >
+                        Watch
+                      </a>
+                      <button
+                        type="button"
+                        className={
+                          copied === row.key ? "button-small quiet done" : "button-small quiet"
+                        }
+                        onClick={() => copy(row)}
+                      >
+                        {copied === row.key ? "Copied" : copyLabel}
+                      </button>
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -337,10 +381,35 @@ export default function Page() {
             Balerion running on your own machine: <code>balerion serve</code>.
           </p>
           <p style={{ marginTop: "0.6rem" }}>
-            The Archive is searched from here directly. apibay refuses datacentre addresses, so
-            those searches are forwarded to the relay on your machine instead, and need it
-            awake.
+            <strong>Watch</strong> opens the Balerion running on the machine you are reading this
+            on, at <code>{local}</code>, with the magnet already handed over. If nothing is
+            running there the tab simply will not load, which is the case on a phone. Copy
+            magnet always works.
           </p>
+          <p style={{ marginTop: "0.6rem" }}>
+            The Archive is searched from here directly. apibay refuses datacentre addresses, so
+            those searches are forwarded to the relay on your own machine instead.{" "}
+            <button
+              type="button"
+              className="button-small quiet"
+              onClick={() => setShowLocal((was) => !was)}
+            >
+              {showLocal ? "Done" : "Change local address"}
+            </button>
+          </p>
+          {showLocal ? (
+            <div className="field" style={{ marginTop: "0.8rem", maxWidth: "22rem" }}>
+              <label htmlFor="local">Local Balerion</label>
+              <input
+                id="local"
+                type="url"
+                spellCheck={false}
+                value={local}
+                onChange={(event) => rememberLocal(event.target.value)}
+                placeholder={DEFAULT_LOCAL}
+              />
+            </div>
+          ) : null}
         </section>
       </main>
     </>

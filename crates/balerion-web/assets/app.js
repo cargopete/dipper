@@ -1181,6 +1181,32 @@ window.addEventListener("resize", () => {
   if (current) refresh();
 });
 
+/* A magnet handed over in the fragment, so the search site can send you here
+ * with something already chosen.
+ *
+ * The fragment rather than a query string on purpose: it never leaves the
+ * browser, so the magnet does not appear in this server's request log, in any
+ * proxy's, or in the Referer of anything the page later loads. It costs nothing
+ * to prefer.
+ *
+ * Cleared from the address bar once read, so a reload does not resolve it a
+ * second time and so the link is not left sitting in history. */
+function openFromFragment() {
+  const fragment = window.location.hash.replace(/^#/, "");
+  if (!fragment) return false;
+
+  const params = new URLSearchParams(fragment);
+  const magnet = params.get("magnet");
+  if (!magnet) return false;
+
+  history.replaceState(null, "", window.location.pathname);
+  setMode("link");
+  el.magnet.value = magnet;
+  openTorrent(magnet);
+  return true;
+}
+
 setMode("search");
 loadFilters();
 startPolling();
+openFromFragment();
