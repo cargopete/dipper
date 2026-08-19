@@ -50,6 +50,10 @@ pub struct Torrent {
     pub meta: Metainfo,
     pub handle: SessionHandle,
     pub task: JoinHandle<dipper_bt::Result<DownloadSummary>>,
+    /// The loop that goes back to the trackers for more peers. Aborted with the
+    /// download: an announce for a torrent nobody is watching any more is a
+    /// request to a stranger's server on behalf of nothing.
+    pub refill: JoinHandle<()>,
     pub root: PathBuf,
     /// Set when the viewer asks to keep this offline. Kept torrents fetch the
     /// whole file rather than only what is ahead of the playhead, and survive
@@ -66,12 +70,14 @@ impl Torrent {
         meta: Metainfo,
         handle: SessionHandle,
         task: JoinHandle<dipper_bt::Result<DownloadSummary>>,
+        refill: JoinHandle<()>,
         root: PathBuf,
     ) -> Self {
         Self {
             meta,
             handle,
             task,
+            refill,
             root,
             keep: AtomicBool::new(false),
             playing: Mutex::new(None),

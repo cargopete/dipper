@@ -315,6 +315,7 @@ pub async fn remove(
 /// torrent alone, which is what makes deleting it safe.
 async fn discard(state: &AppState, torrent: &Arc<Torrent>) {
     torrent.task.abort();
+    torrent.refill.abort();
     let root = state.root_for(&torrent.meta.info_hash);
     if root.starts_with(&state.config.data_dir)
         && let Err(err) = tokio::fs::remove_dir_all(&root).await

@@ -7,6 +7,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use dipper_bt::discovery::{Discovery, DiscoveryConfig};
@@ -14,11 +15,25 @@ use dipper_bt::infohash::generate_peer_id;
 use dipper_bt::session::{DownloadConfig, VerifyPolicy};
 use dipper_bt::{Dht, Magnet, Metainfo, Strategy, peer, session};
 use dipper_ia::{IaClient, metadata, torrent as ia_torrent};
+use tokio::task::JoinHandle;
 
 use crate::state::{ServeConfig, Torrent};
 
 /// How many peers to try for the metadata before giving up.
 const METADATA_PEERS: usize = 8;
+
+/// How often to go back to the trackers for more peers.
+///
+/// Not faster. Trackers ask for an announce every half hour or so and are
+/// entitled to be annoyed at less; five minutes is already generous of them,
+/// and the loop skips the request entirely whenever the swarm is healthy.
+const REANNOUNCE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// How long the engine waits for more peers before it gives up.
+///
+/// Must be comfortably more than [`REANNOUNCE_INTERVAL`], or the session ends
+/// in the gap between two announcements and takes the player down with it.
+const PEER_REFILL_GRACE: Duration = Duration::from_secs(11 * 60);
 
 /// What the user gave us, resolved as far as it can be without the swarm.
 #[derive(Debug)]
@@ -182,6 +197,9 @@ pub async fn start(
         pipeline_depth: config.pipeline_depth,
         port: config.peer_port,
         verify: VerifyPolicy::Auto,
+        // This caller does re-announce, so the engine should wait to be fed
+        // rather than concluding the swarm is dead the moment its list runs dry.
+        peer_refill_grace: PEER_REFILL_GRACE,
         // The whole point: fetch what the player is waiting on, not what the
         // swarm would prefer we fetched.
         strategy: Strategy::Streaming,
@@ -192,12 +210,93 @@ pub async fn start(
         .await
         .context("could not start the download")?;
 
+    let refill = spawn_refill(&meta, handle.clone(), config);
+
     Ok(Arc::new(Torrent::new(
         meta,
         handle,
         task,
+        refill,
         root.to_path_buf(),
     )))
+}
+
+/// Keep going back to the trackers for peers, for as long as the download needs
+/// them.
+///
+/// The engine deliberately knows nothing about trackers: it is handed addresses
+/// and asked for pieces. This is the other half of that bargain. Without it the
+/// engine works through every address discovery found at the start and then
+/// runs on whatever survived, which on a public swarm is usually one or two of
+/// the sixty a tracker named.
+///
+/// Trackers only, no DHT: a second DHT would want the same UDP port as the one
+/// already running, and the trackers are where the peers actually came from.
+fn spawn_refill(
+    meta: &Metainfo,
+    handle: dipper_bt::SessionHandle,
+    config: &ServeConfig,
+) -> JoinHandle<()> {
+    // The Archive is the case this must not touch. Its items arrive with a
+    // webseed that serves the whole file over HTTPS, and its trackers refuse
+    // third-party seeding, so there is no peer to find and asking every five
+    // minutes is noise on someone else's server for nothing.
+    if !meta.webseeds.is_empty() {
+        return tokio::spawn(async {});
+    }
+
+    let magnet = meta.magnet();
+    let total_length = meta.total_length;
+    let max_peers = config.max_peers;
+    let discovery_config = DiscoveryConfig {
+        tracker_timeout: config.tracker_timeout,
+        dht_budget: Duration::ZERO,
+        use_dht: false,
+        port: config.peer_port,
+    };
+
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(REANNOUNCE_INTERVAL);
+        // The first tick is immediate and the list is seconds old at that
+        // point, so it is spent rather than acted on.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let stats = handle.stats();
+            if stats.is_complete() {
+                return;
+            }
+            // A full complement of peers is not a problem in want of solving.
+            if stats.peers_connected >= max_peers {
+                continue;
+            }
+
+            let discovery = Discovery::new(magnet.info_hash);
+            // Announced honestly: trackers use `left` to tell seeders from
+            // leechers, and claiming zero would have us listed as a seeder we
+            // are not.
+            let left = total_length.saturating_sub(stats.bytes_on_disk);
+            discovery
+                .run(
+                    &magnet,
+                    generate_peer_id(),
+                    left,
+                    None,
+                    &discovery_config,
+                    |_, _| {},
+                )
+                .await;
+
+            let found = discovery.peers();
+            let fresh = handle.add_peers(found.iter().copied());
+            tracing::debug!(
+                connected = stats.peers_connected,
+                found = found.len(),
+                fresh,
+                "re-announced for more peers"
+            );
+        }
+    })
 }
 
 #[cfg(test)]

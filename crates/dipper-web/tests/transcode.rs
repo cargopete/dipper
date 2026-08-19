@@ -199,7 +199,17 @@ async fn harness() -> Harness {
     });
     state.tools = dipper_web::ffmpeg::Tools::detect().await;
     let state = Arc::new(state);
-    state.insert(info_hash, Arc::new(Torrent::new(meta, handle, task, root)));
+    // No refill loop in the fixture: nothing here has a tracker to ask.
+    state.insert(
+        info_hash,
+        Arc::new(Torrent::new(
+            meta,
+            handle,
+            task,
+            tokio::spawn(async {}),
+            root,
+        )),
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

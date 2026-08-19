@@ -177,7 +177,15 @@ async fn harness() -> Harness {
     }));
     state.insert(
         info_hash,
-        Arc::new(Torrent::new(meta, handle, task, root.clone())),
+        // No refill loop in the fixture: there is no tracker to ask and the
+        // test drives the engine directly.
+        Arc::new(Torrent::new(
+            meta,
+            handle,
+            task,
+            tokio::spawn(async {}),
+            root.clone(),
+        )),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
