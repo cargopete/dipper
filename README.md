@@ -48,6 +48,28 @@ and in the interface it is indistinguishable from one still looking for peers.
 The count of what was dropped is shown next to the results rather than quietly
 swallowed.
 
+### Defending a thin connection
+
+The search box has a "fits a thin line" toggle, and it is a size filter rather
+than anything to do with the transcoder. Transcoding cannot help here: ffmpeg
+reads the source back through dipper's own range endpoint, so every byte of a
+2.7 GiB episode is fetched from the swarm whatever resolution comes out of the
+other end. The only way to need fewer bytes is to pick a smaller release, and
+that decision belongs in the search results.
+
+The cap is derived rather than chosen: 1.5 Mbit/s, which is about what a poor
+line sustains, times the category's typical runtime. That works out at 483 MiB
+for an episode and 1.2 GiB for a feature. The runtime is a stated guess, because
+apibay reports a size and never a duration, and nothing derived from it is shown
+as though it were measured. Size is still the right thing to filter on: within
+one search every result is the same programme at a different bitrate, so sizes
+rank exactly as bitrates do.
+
+Two honest limitations. The cap measures the whole torrent, so a season pack is
+excluded even though dipper would only fetch the episode you played. And with
+the cap on, the HD categories are usually empty, which is the true answer rather
+than a bug: no 1080p release of anything streams on 1.5 Mbit/s.
+
 What is on the other end is a public index of whatever strangers uploaded. Most
 of it is copyrighted, none of it is cleared, and the category is not a licence.
 dipper says so under the search box rather than in a comment nobody reads.

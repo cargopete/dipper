@@ -20,6 +20,9 @@ const el = {
   filterLabel: $("filter-label"),
   filterNote: $("filter-note"),
   sourceNote: $("source-note"),
+  thinRow: $("thin-row"),
+  thin: $("thin"),
+  thinLabel: $("thin-label"),
   searchSubmit: $("search-submit"),
   results: $("results"),
   resultList: $("result-list"),
@@ -840,13 +843,19 @@ const SOURCES = {
     note: () => null,
     /* An empty query browses the collection, which is genuinely useful here. */
     allowsEmpty: true,
+    /* The Archive's moving image library is mostly small and mostly old. There
+     * is nothing here for a size cap to save anyone from, so the control does
+     * not appear. */
+    thinCap: () => null,
     query: (terms) => `/api/search?${new URLSearchParams({
       q: terms,
       shelf: el.filter.value,
       limit: "24",
     })}`,
+    /* Nothing excluded for size, because nothing was filtered on it. */
+    excluded: () => [],
     count: (data) => (data.hits.length ? `showing ${data.hits.length} of ${data.total}` : ""),
-    empty: "Nothing in this collection matches that. Try fewer words, or a different collection.",
+    empty: () => "Nothing in this collection matches that. Try fewer words, or a different collection.",
     row: (hit) => ({
       title: hit.title,
       meta: [hit.creator, hit.year, hit.identifier],
@@ -865,19 +874,38 @@ const SOURCES = {
      * which would surface as "nothing matches that", which is not what
      * happened. */
     allowsEmpty: false,
+    /* Each category caps at what a thin line sustains over its typical
+     * runtime, so the number differs between a film and an episode. Read off
+     * the selected category rather than hardcoded, and shown on the control:
+     * "under 506 MiB" is a claim someone can check, "small" is not. */
+    thinCap: (option) => option.thin_cap,
     query: (terms) => `/api/tpb/search?${new URLSearchParams({
       q: terms,
       category: el.filter.value,
       limit: "24",
+      thin: el.thin.checked ? "true" : "false",
     })}`,
+    excluded: (data) => [
+      data.oversize ? `${data.oversize} too large` : null,
+      data.unseeded ? `${data.unseeded} unseeded` : null,
+    ],
     count: (data) => {
-      if (!data.hits.length) return "";
-      const shown = `showing ${data.hits.length} of ${data.total}`;
-      /* Reported rather than hidden. Showing 24 of 24 when the search actually
-       * found 55 reads as though 24 was all there was. */
-      return data.unseeded ? `${shown}, ${data.unseeded} unseeded hidden` : shown;
+      /* Reported even when nothing survived, because "0 shown, 41 too large"
+       * is the answer to "why is this empty" and an empty list on its own is
+       * not. A filter that hides most of a swarm has to say so. */
+      const shown = data.hits.length ? `showing ${data.hits.length} of ${data.total}` : "nothing to show";
+      const hidden = SOURCES.tpb.excluded(data).filter(Boolean);
+      return hidden.length ? `${shown}, ${hidden.join(" and ")} hidden` : shown;
     },
-    empty: "Nothing in this category with anyone seeding it. Try fewer words, or a broader category.",
+    /* Advice, not an apology. With the cap on, an HD category is usually empty
+     * for the honest reason that no 1080p release of anything fits a thin
+     * line, and the useful next move is the standard definition category
+     * rather than a broader one, which is mostly more HD. */
+    empty: () =>
+      el.thin.checked
+        ? "Nothing here small enough for a thin line. The standard definition categories are " +
+          "where the small releases live; failing that, untick the box and accept the stalling."
+        : "Nothing in this category with anyone seeding it. Try fewer words, or a broader category.",
     row: (hit) => ({
       title: hit.name,
       meta: [
@@ -950,8 +978,24 @@ async function loadFilters() {
 }
 
 function showFilterNote() {
-  const chosen = filters.find((option) => option.key === el.filter.value);
-  el.filterNote.textContent = chosen ? chosen.note : "";
+  const option = filters.find((entry) => entry.key === el.filter.value);
+  el.filterNote.textContent = option ? option.note : "";
+
+  const cap = option ? source().thinCap(option) : null;
+  show(el.thinRow, cap !== null && cap !== undefined);
+  if (cap) {
+    el.thinLabel.textContent = `Fits a thin line (under ${bytes(cap)})`;
+    /* The whole torrent is measured, not the file you would actually watch.
+     * dipper only fetches what the player asks for, so a season pack streams
+     * one episode at a time and is judged here as though you wanted all of it.
+     * Said out loud rather than quietly excluding packs, which would be the
+     * clever wrong answer. */
+    el.thinRow.title =
+      `Hides anything larger than ${bytes(cap)}, which is about what 1.5 Mbit/s ` +
+      `sustains over a typical ${el.filter.value.includes("tv") ? "episode" : "film"}. ` +
+      `Measured on the whole torrent, so season packs are excluded even though ` +
+      `you would only stream one episode of one.`;
+  }
 }
 
 function renderResults(data) {
@@ -963,7 +1007,7 @@ function renderResults(data) {
   if (!data.hits.length) {
     const empty = document.createElement("li");
     empty.className = "hint";
-    empty.textContent = chosen.empty;
+    empty.textContent = chosen.empty();
     el.resultList.append(empty);
     return;
   }
@@ -1069,6 +1113,12 @@ el.searchForm.addEventListener("submit", async (event) => {
 });
 
 el.filter.addEventListener("change", showFilterNote);
+
+/* Ticking the box with results on screen would otherwise leave a list that no
+ * longer matches the control above it. */
+el.thin.addEventListener("change", () => {
+  if (!el.results.hidden) el.searchForm.requestSubmit();
+});
 
 /* Changing the index invalidates whatever is on screen: those results belong
  * to the other one, and leaving them under a new menu is a fine way to click

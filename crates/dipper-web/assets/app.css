@@ -249,6 +249,15 @@ button[disabled] { opacity: 0.5; cursor: progress; }
   outline-offset: 2px;
 }
 
+/* The thin-line toggle sits under the search row rather than in it: the row is
+   already a grid of four columns, and a fifth would squeeze the query box on a
+   laptop for the sake of a checkbox. */
+.toggle-inline {
+  margin-top: 0.8rem;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
 /* A note that is a caution rather than an explanation. Marked by a rule in the
  * margin instead of a colour alone, so it still reads as different in
  * monochrome and to anyone who does not see the red. */
