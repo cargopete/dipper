@@ -157,6 +157,9 @@ export default function Page() {
   const [local, setLocal] = useState(DEFAULT_LOCAL);
   const [showLocal, setShowLocal] = useState(false);
 
+  /* The deployment's own answer wins over the built-in default, and a value set
+     in this browser wins over both. Most people should never touch the third:
+     the point of the first is that one address serves every device. */
   useEffect(() => {
     const saved = window.localStorage.getItem("balerion.local");
     if (saved) setLocal(saved);
@@ -179,7 +182,13 @@ export default function Page() {
   useEffect(() => {
     fetch("/api/search?catalogue")
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error())))
-      .then((body: { indexes: IndexInfo[] }) => setIndexes(body.indexes))
+      .then((body: { indexes: IndexInfo[]; local: string | null }) => {
+        setIndexes(body.indexes);
+        // Only when this browser has not been given one of its own.
+        if (body.local && !window.localStorage.getItem("balerion.local")) {
+          setLocal(body.local);
+        }
+      })
       .catch(() => setError("Could not load the indexes. Nothing will search until that does."));
   }, []);
 
@@ -656,10 +665,11 @@ export default function Page() {
             the server&rdquo;: your phone is not running one.
           </p>
           <p style={{ marginTop: "0.6rem" }}>
-            To use it from a phone, give that machine an address the phone can reach and set it
-            below. <code>tailscale serve --bg 8080</code> publishes it to your tailnet and nothing
-            else, which is the one way to do this that does not also hand it to whoever else is on
-            the wifi. Then set the address to your machine&apos;s <code>.ts.net</code> name.
+            That address comes from this deployment, so it is the same on every device you open
+            this on. It is published to your tailnet by{" "}
+            <code>tailscale serve --bg 8080</code> and to nothing else, which is the one way to
+            reach it from a phone without also handing it to whoever else is on the wifi. Change
+            it below only if this particular device needs a different one.
           </p>
           <p style={{ marginTop: "0.6rem" }}>
             The Archive is searched from here directly. apibay refuses datacentre addresses, so

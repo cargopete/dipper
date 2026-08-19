@@ -14,9 +14,22 @@ import { RelayError, relayConfig, relayFetch } from "../../../lib/relay";
  * connection and gets a clean 200. */
 
 /** What the page needs to build its menus, plus what it can actually reach. */
+/* Where this deployment's Balerion lives, if it has been told.
+ *
+ * One address for every device rather than a setting per browser. A tailnet name
+ * works from the machine itself as well as from a phone, so there is nothing to
+ * configure twice and nothing that only works when you are sitting at the right
+ * desk. Loopback is the fallback, which is right for someone running both halves
+ * on one machine and wrong for everyone else, which is why this exists. */
+function localBalerion(): string | null {
+  const url = process.env.BALERION_LOCAL_URL?.trim();
+  return url ? url.replace(/\/+$/, "") : null;
+}
+
 function catalogue() {
   return NextResponse.json({
     relayConfigured: relayConfig() !== null,
+    local: localBalerion(),
     // Ordered as the menu shows them, apibay first: it is what this is used for.
     // The Archive is the safer index and the second choice, which is a different
     // claim from being the default one.
