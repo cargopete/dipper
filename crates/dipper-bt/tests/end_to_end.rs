@@ -378,3 +378,62 @@ async fn a_resume_file_survives_being_killed_mid_download() {
     .unwrap();
     assert_eq!(forced_rechecks, meta.piece_count());
 }
+
+/// A listener that accepts a connection, records it, and hangs up.
+///
+/// Stands in for the bulk of a public swarm: an address a tracker will happily
+/// name and that gives you nothing. What matters here is only that connecting
+/// to it fails after it has been counted.
+async fn spawn_dead_peer(dialled: Arc<std::sync::Mutex<Vec<SocketAddr>>>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            dialled.lock().unwrap().push(addr);
+            drop(socket);
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn every_discovered_peer_is_tried_not_just_the_first_batch() {
+    // The regression this exists for: the session used to take the first
+    // `max_peers` addresses, spawn one task each, and never look at the rest.
+    // On a real swarm most addresses are unreachable, so the live seeders sat
+    // in the unread tail of the list while thirty dead slots stayed occupied
+    // for the whole download.
+    let files = fixture_files();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.clone()))
+        .collect();
+    let meta = build_torrent(&borrowed);
+
+    let dialled = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut peers = Vec::new();
+    for _ in 0..12 {
+        peers.push(spawn_dead_peer(Arc::clone(&dialled)).await);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = DownloadConfig {
+        // Four times fewer slots than addresses, so passing this test is only
+        // possible by refilling them.
+        max_peers: 3,
+        ..Default::default()
+    };
+    // No webseed and no real peer, so it cannot finish. The failure is the
+    // expected outcome; what is under test is how many addresses were tried
+    // before it gave up.
+    let result = session::download(&meta, dir.path(), peers.clone(), &config, |_| {}).await;
+    assert!(result.is_err(), "nothing could supply a piece");
+
+    let dialled = dialled.lock().unwrap().clone();
+    for addr in &peers {
+        assert!(dialled.contains(addr), "{addr} was never tried");
+    }
+    // Each address is worth one attempt when connecting to it fails, so a
+    // number well above twelve would mean the supervisor is retrying the dead.
+    assert_eq!(dialled.len(), peers.len(), "dialled: {dialled:?}");
+}

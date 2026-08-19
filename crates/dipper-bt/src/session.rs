@@ -5,7 +5,7 @@
 //! piece state of their own beyond what they have; the picker owns assignment,
 //! so a peer dying mid-piece just releases it back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{Mutex, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::error::{Error, Result};
 use crate::infohash::generate_peer_id;
@@ -45,6 +45,20 @@ pub struct DownloadConfig {
     /// Which piece to fetch next. Leave as [`Strategy::Rarest`] unless a
     /// reader is waiting on specific bytes, which is what [`spawn`] is for.
     pub strategy: Strategy,
+    /// How long to wait for someone to hand us more peers once every address
+    /// we know of is spent, before concluding that nobody will.
+    ///
+    /// The session does not know what a tracker is and cannot go looking, so
+    /// this is the window in which a caller who does can call
+    /// [`SessionHandle::add_peers`].
+    ///
+    /// Zero by default, which is the old behaviour exactly: run out of
+    /// addresses with nothing connected and the search stops. A caller that
+    /// re-announces on a timer should set this comfortably longer than that
+    /// timer, or the session gives up in the gap between announcements. A
+    /// caller that does not should leave it alone rather than pay a wait for a
+    /// refill that is never coming.
+    pub peer_refill_grace: Duration,
 }
 
 /// What to do about data that is already in the download directory.
@@ -72,7 +86,89 @@ impl Default for DownloadConfig {
             port: 6881,
             verify: VerifyPolicy::Auto,
             strategy: Strategy::Rarest,
+            peer_refill_grace: Duration::ZERO,
         }
+    }
+}
+
+/// How many times one address is worth trying.
+///
+/// A peer that connects and then finds nothing to give us goes back in the
+/// queue, because under [`Strategy::Streaming`] the picker often has nothing to
+/// hand out for a moment and retiring a live seeder over that would be
+/// perverse. This bounds the resulting churn: without it, a peer that connects
+/// and immediately idles out would be requeued for ever.
+const MAX_PEER_ATTEMPTS: u32 = 3;
+
+/// Addresses waiting for a connection slot, and how often each has been tried.
+///
+/// The queue exists because of what a public swarm actually looks like. A
+/// tracker will happily name 60 peers of which most are unreachable: behind a
+/// NAT nobody can dial, or simply fake. Taking the first `max_peers` of that
+/// list once and never revisiting it means the dead addresses hold their slots
+/// for the whole download, and a swarm of 44 seeders is served by whichever one
+/// or two happened to answer.
+#[derive(Debug, Default)]
+struct PeerQueue {
+    inner: std::sync::Mutex<PeerQueueInner>,
+    /// Woken when addresses arrive, so a supervisor with empty hands does not
+    /// have to poll to notice.
+    added: Notify,
+}
+
+#[derive(Debug, Default)]
+struct PeerQueueInner {
+    pending: VecDeque<std::net::SocketAddr>,
+    attempts: HashMap<std::net::SocketAddr, u32>,
+}
+
+impl PeerQueue {
+    fn new(peers: impl IntoIterator<Item = std::net::SocketAddr>) -> Self {
+        let queue = Self::default();
+        queue.push(peers);
+        queue
+    }
+
+    /// Add addresses, ignoring any already queued or already spent.
+    ///
+    /// Returns how many were actually new. Re-announcing returns mostly the
+    /// same list every time, so without the filtering a refill would push the
+    /// same dead addresses back in front of the live ones.
+    fn push(&self, peers: impl IntoIterator<Item = std::net::SocketAddr>) -> usize {
+        let mut inner = self.inner.lock().expect("peer queue lock");
+        let mut added = 0;
+        for addr in peers {
+            let spent = inner
+                .attempts
+                .get(&addr)
+                .is_some_and(|tries| *tries >= MAX_PEER_ATTEMPTS);
+            if spent || inner.pending.contains(&addr) {
+                continue;
+            }
+            inner.pending.push_back(addr);
+            added += 1;
+        }
+        drop(inner);
+        if added > 0 {
+            self.added.notify_waiters();
+        }
+        added
+    }
+
+    /// Take the next address to try, counting the attempt.
+    fn pop(&self) -> Option<std::net::SocketAddr> {
+        let mut inner = self.inner.lock().expect("peer queue lock");
+        let addr = inner.pending.pop_front()?;
+        *inner.attempts.entry(addr).or_insert(0) += 1;
+        Some(addr)
+    }
+
+    /// Put a peer that worked back at the end of the queue.
+    ///
+    /// At the end rather than the front: it has just told us it has nothing for
+    /// us right now, so everything untried deserves a look first.
+    fn requeue(&self, addr: std::net::SocketAddr) {
+        self.push([addr]);
     }
 }
 
@@ -342,6 +438,7 @@ pub struct SessionHandle {
     picker: Arc<Mutex<Picker>>,
     stats: Arc<Stats>,
     have: watch::Receiver<Bitfield>,
+    peers: Arc<PeerQueue>,
 }
 
 impl SessionHandle {
@@ -374,6 +471,21 @@ impl SessionHandle {
                 return false;
             }
         }
+    }
+
+    /// Offer the session more peers to try.
+    ///
+    /// The engine has no idea what a tracker is, on purpose: it is handed
+    /// addresses and asked for pieces. This is how a caller that does know
+    /// keeps it supplied, by re-announcing on a timer and passing on whatever
+    /// comes back. Addresses already tried to exhaustion are ignored, so
+    /// passing the same list repeatedly is free.
+    ///
+    /// Returns how many were new. Worth logging: on a hostile swarm a refill
+    /// that adds nothing means every address the tracker knows is spent, and no
+    /// amount of waiting will change that.
+    pub fn add_peers(&self, peers: impl IntoIterator<Item = std::net::SocketAddr>) -> usize {
+        self.peers.push(peers)
     }
 
     /// Nominate the piece spans a reader needs soonest, most urgent first.
@@ -524,6 +636,8 @@ async fn start(
     let storage = Arc::new(storage);
     let (have_tx, have_rx) = watch::channel(existing);
 
+    let queue = Arc::new(PeerQueue::new(peers));
+
     let shared = Arc::new(Shared {
         meta: meta.clone(),
         storage: Arc::clone(&storage),
@@ -540,26 +654,21 @@ async fn start(
         picker,
         stats: Arc::clone(&stats),
         have: have_rx,
+        peers: Arc::clone(&queue),
     };
 
     let mut tasks = Vec::new();
 
     if !shared.is_complete().await {
-        let peer_id = generate_peer_id();
-        for addr in peers.into_iter().take(config.max_peers) {
-            let shared = Arc::clone(&shared);
-            let config = config.clone();
-            tasks.push(tokio::spawn(async move {
-                let reason = match run_peer(addr, peer_id, &shared, &config).await {
-                    Ok(()) => "finished".to_string(),
-                    Err(err) => err.to_string(),
-                };
-                let _ = shared.progress.send(Progress::PeerLost {
-                    addr: addr.to_string(),
-                    reason,
-                });
-            }));
-        }
+        // One supervisor rather than one task per address, so a dead peer
+        // frees its slot for the next candidate instead of holding it until
+        // the download ends.
+        let shared_for_peers = Arc::clone(&shared);
+        let queue_for_peers = Arc::clone(&queue);
+        let peer_config = config.clone();
+        tasks.push(tokio::spawn(async move {
+            supervise_peers(queue_for_peers, shared_for_peers, peer_config).await;
+        }));
 
         for url in &meta.webseeds {
             for _ in 0..config.webseed_tasks.max(1) {
@@ -640,6 +749,74 @@ where
     }
     Ok(summary)
 }
+
+/// Keep up to `max_peers` peer connections going for as long as there is work.
+///
+/// Fills every free slot from the queue, waits for whichever worker finishes
+/// first, and fills again. A worker that ended cleanly goes back in the queue
+/// because it is a peer that demonstrably talks to us; one that ended with an
+/// error is left where it fell.
+///
+/// Gives up when the queue is empty, nothing is connected, and nobody has
+/// offered more addresses within `peer_refill_grace`. That last condition is
+/// what stops a dead swarm hanging the caller for ever while still leaving room
+/// for a caller who re-announces to keep the session alive.
+async fn supervise_peers(queue: Arc<PeerQueue>, shared: Arc<Shared>, config: DownloadConfig) {
+    let peer_id = generate_peer_id();
+    let mut workers: JoinSet<std::net::SocketAddr> = JoinSet::new();
+
+    while !shared.is_complete().await {
+        while workers.len() < config.max_peers {
+            let Some(addr) = queue.pop() else { break };
+            let shared = Arc::clone(&shared);
+            let config = config.clone();
+            workers.spawn(async move {
+                let reason = match run_peer(addr, peer_id, &shared, &config).await {
+                    Ok(()) => "finished".to_string(),
+                    Err(err) => err.to_string(),
+                };
+                let requeue = reason == "finished";
+                let _ = shared.progress.send(Progress::PeerLost {
+                    addr: addr.to_string(),
+                    reason,
+                });
+                // The address is handed back through the join value rather than
+                // by touching the queue here, so requeueing cannot race the
+                // supervisor's own decision to stop.
+                if requeue { addr } else { UNUSABLE }
+            });
+        }
+
+        if workers.is_empty() {
+            // Nothing connected and nothing left to try. Wait to be given more.
+            let waited = tokio::time::timeout(config.peer_refill_grace, queue.added.notified());
+            if waited.await.is_err() {
+                tracing::debug!("no peers left to try and none offered; stopping the peer search");
+                return;
+            }
+            continue;
+        }
+
+        // Slots are full, or the queue is empty and some workers are still
+        // going. Either way the next thing to react to is whichever comes
+        // first: a worker ending, or fresh addresses arriving.
+        tokio::select! {
+            finished = workers.join_next() => {
+                if let Some(Ok(addr)) = finished
+                    && addr != UNUSABLE
+                {
+                    queue.requeue(addr);
+                }
+            }
+            () = queue.added.notified() => {}
+        }
+    }
+}
+
+/// Stands in for "this address is not worth another go" in a worker's join
+/// value. An unspecified address with port 0 is not a peer anyone can dial.
+const UNUSABLE: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
 
 /// One peer, from connect to exhaustion.
 async fn run_peer(
@@ -862,6 +1039,69 @@ async fn run_webseed(url: &str, shared: &Shared, timeout: Duration) -> Result<()
                 tokio::time::sleep(webseed_backoff(failures)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_queue_tests {
+    use super::*;
+
+    fn addr(port: u16) -> std::net::SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    #[test]
+    fn addresses_come_back_in_the_order_they_went_in() {
+        let queue = PeerQueue::new([addr(1), addr(2), addr(3)]);
+        assert_eq!(queue.pop(), Some(addr(1)));
+        assert_eq!(queue.pop(), Some(addr(2)));
+        assert_eq!(queue.pop(), Some(addr(3)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn a_duplicate_does_not_take_a_second_slot_in_the_queue() {
+        // Re-announcing returns almost the same list every time. Without this,
+        // a refill would push the addresses we have already given up on back in
+        // front of the ones we have not tried.
+        let queue = PeerQueue::new([addr(1), addr(2)]);
+        assert_eq!(queue.push([addr(1), addr(2), addr(3)]), 1);
+        assert_eq!(queue.pop(), Some(addr(1)));
+        assert_eq!(queue.pop(), Some(addr(2)));
+        assert_eq!(queue.pop(), Some(addr(3)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn an_address_is_retired_once_its_attempts_are_spent() {
+        let queue = PeerQueue::new([]);
+        for attempt in 1..=MAX_PEER_ATTEMPTS {
+            assert_eq!(queue.push([addr(9)]), 1, "attempt {attempt}");
+            assert_eq!(queue.pop(), Some(addr(9)));
+        }
+        // Spent. A tracker naming it again must not buy it another go, or a
+        // peer that accepts and hangs up would be dialled for ever.
+        assert_eq!(queue.push([addr(9)]), 0);
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn a_requeued_peer_goes_behind_everything_untried() {
+        // It has just told us it has nothing for us right now, so anything we
+        // have never spoken to deserves a look first.
+        let queue = PeerQueue::new([addr(1), addr(2)]);
+        let first = queue.pop().unwrap();
+        queue.requeue(first);
+        assert_eq!(queue.pop(), Some(addr(2)), "the untried one comes first");
+        assert_eq!(queue.pop(), Some(addr(1)));
+    }
+
+    #[test]
+    fn pushing_nothing_reports_nothing_and_wakes_nobody() {
+        let queue = PeerQueue::new([addr(1)]);
+        assert_eq!(queue.push([]), 0);
+        // Already queued, so still nothing new.
+        assert_eq!(queue.push([addr(1)]), 0);
     }
 }
 
