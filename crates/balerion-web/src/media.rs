@@ -122,6 +122,92 @@ fn other(content_type: &'static str) -> Media {
 /// offered, because balerion can convert them when ffmpeg is present. An item
 /// whose only video is an MPEG program stream, which describes a good deal of
 /// the Internet Archive, should still open on something.
+/// Season and episode read out of a filename, when it says.
+///
+/// Season packs are the common case for television and their filenames are the
+/// only record of what is in them: a torrent lists paths and lengths and nothing
+/// else. Without this a pack is a wall of near-identical names in whatever order
+/// whoever made it happened to add them, and the player opens whichever file is
+/// biggest, which is not episode one.
+///
+/// Handles the two spellings that actually occur. `S01E02` in any case, with any
+/// separator or none, and the older `1x02`. Deliberately not a general parser:
+/// anything cleverer starts matching resolutions and years.
+pub fn episode_of(path: &str) -> Option<(u32, u32)> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let bytes: Vec<char> = name.chars().collect();
+
+    // SxxEyy, the overwhelming majority.
+    for (index, window) in bytes.windows(2).enumerate() {
+        if !window[0].eq_ignore_ascii_case(&'s') {
+            continue;
+        }
+        // A letter before the S means this is the middle of a word, not a tag.
+        if index > 0 && bytes[index - 1].is_alphanumeric() {
+            continue;
+        }
+        let mut cursor = index + 1;
+        // `continue`, never `?`: most of the letters s in a filename are just
+        // letters, and giving up at the first one means "Show.S01E03" and
+        // "Better Call Saul S06E13" both read as no episode at all.
+        let Some(season) = take_number(&bytes, &mut cursor) else {
+            continue;
+        };
+        // Skip whatever sits between the two, including nothing at all.
+        while cursor < bytes.len() && !bytes[cursor].is_ascii_alphanumeric() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || !bytes[cursor].eq_ignore_ascii_case(&'e') {
+            continue;
+        }
+        cursor += 1;
+        let Some(episode) = take_number(&bytes, &mut cursor) else {
+            continue;
+        };
+        return Some((season, episode));
+    }
+
+    // 1x02, older but still about.
+    for (index, ch) in bytes.iter().enumerate() {
+        if !ch.eq_ignore_ascii_case(&'x') || index == 0 {
+            continue;
+        }
+        let mut back = index;
+        while back > 0 && bytes[back - 1].is_ascii_digit() {
+            back -= 1;
+        }
+        if back == index {
+            continue;
+        }
+        let Ok(season) = bytes[back..index].iter().collect::<String>().parse::<u32>() else {
+            continue;
+        };
+        let mut cursor = index + 1;
+        let Some(episode) = take_number(&bytes, &mut cursor) else {
+            continue;
+        };
+        return Some((season, episode));
+    }
+
+    None
+}
+
+/// Read consecutive digits from `cursor`, advancing it. None if there are none.
+fn take_number(chars: &[char], cursor: &mut usize) -> Option<u32> {
+    let start = *cursor;
+    while *cursor < chars.len() && chars[*cursor].is_ascii_digit() {
+        *cursor += 1;
+    }
+    if start == *cursor {
+        return None;
+    }
+    chars[start..*cursor]
+        .iter()
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 pub fn best_to_play(files: &[balerion_bt::TorrentFile]) -> Option<usize> {
     let pick = |kind: Kind, playback: Playback| {
         files
@@ -134,10 +220,118 @@ pub fn best_to_play(files: &[balerion_bt::TorrentFile]) -> Option<usize> {
             .max_by_key(|(_, file)| file.length)
             .map(|(index, _)| index)
     };
-    pick(Kind::Video, Playback::Native)
+    /* A season pack should open on its first episode, not its fattest one.
+     * Largest is the right answer for a film torrent, where the big file is the
+     * feature and the rest are samples and artwork, and the wrong one for a
+     * pack, where it just means whichever episode had the most going on. */
+    let first_episode = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| {
+            let media = classify(&file.path);
+            media.kind == Kind::Video && media.playback != Playback::NotMedia
+        })
+        .filter_map(|(index, file)| episode_of(&file.path).map(|episode| (episode, index)))
+        .min()
+        .map(|(_, index)| index);
+
+    first_episode
+        .or_else(|| pick(Kind::Video, Playback::Native))
         .or_else(|| pick(Kind::Video, Playback::NeedsRemux))
         .or_else(|| pick(Kind::Audio, Playback::Native))
         .or_else(|| pick(Kind::Audio, Playback::NeedsRemux))
+}
+
+#[cfg(test)]
+mod episode_tests {
+    use super::*;
+
+    #[test]
+    fn the_common_spellings_are_read() {
+        // All taken from filenames that actually turned up in searches.
+        let cases = [
+            ("Game.of.Thrones.S01E01.Winter.Is.Coming.1080p.mkv", (1, 1)),
+            ("Better Call Saul S06E13 Saul Gone 1080p.mkv", (6, 13)),
+            ("Some.Show.s02e07.WEB.x264.mkv", (2, 7)),
+            ("Show - 1x02 - Title.avi", (1, 2)),
+            ("Show.S01.E04.mkv", (1, 4)),
+            ("Show S1E9 thing.mp4", (1, 9)),
+            ("Dune.Prophecy.S01E05.2160p.mkv", (1, 5)),
+        ];
+        for (name, want) in cases {
+            assert_eq!(episode_of(name), Some(want), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_path_is_read_by_its_filename_alone() {
+        // The directory is usually the pack's name and carries a season number
+        // of its own, which is not the episode's.
+        assert_eq!(
+            episode_of("Game.of.Thrones.S05.COMPLETE/Game.of.Thrones.S05E08.mkv"),
+            Some((5, 8))
+        );
+    }
+
+    #[test]
+    fn things_that_are_not_episodes_are_not_read_as_episodes() {
+        for name in [
+            "Dune.Part.Two.2024.2160p.mkv",
+            "Some.Film.1080p.BluRay.x265.mkv",
+            "readme.txt",
+            "Movie.Extras.mkv",
+        ] {
+            assert_eq!(episode_of(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_letter_before_the_s_is_not_a_season_marker() {
+        // "Titans" ends in s; without the word-boundary check the parser would
+        // read the next digits as a season.
+        assert_eq!(episode_of("Titans.2018.1080p.mkv"), None);
+    }
+
+    fn file(path: &str, length: u64) -> balerion_bt::TorrentFile {
+        balerion_bt::TorrentFile {
+            path: path.to_string(),
+            length,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn a_season_pack_opens_on_its_first_episode_not_its_biggest() {
+        // The regression this exists for: picking the largest file meant a pack
+        // opened on whichever episode happened to have the most going on.
+        let files = vec![
+            file("Show/Show.S01E03.mkv", 900),
+            file("Show/Show.S01E01.mkv", 100),
+            file("Show/Show.S01E02.mkv", 500),
+        ];
+        assert_eq!(best_to_play(&files), Some(1), "should be S01E01");
+    }
+
+    #[test]
+    fn episodes_across_seasons_order_by_season_first() {
+        let files = vec![
+            file("Show/Show.S02E01.mkv", 100),
+            file("Show/Show.S01E09.mkv", 100),
+        ];
+        assert_eq!(best_to_play(&files), Some(1), "S01E09 comes before S02E01");
+    }
+
+    #[test]
+    fn a_film_torrent_still_picks_the_feature() {
+        // No episode numbers anywhere, so largest is right again: the big file
+        // is the film and the rest are samples and artwork.
+        let files = vec![
+            file("Film/sample.mkv", 10),
+            file("Film/Film.2024.1080p.mkv", 9_000),
+            file("Film/poster.jpg", 1),
+        ];
+        assert_eq!(best_to_play(&files), Some(1));
+    }
 }
 
 #[cfg(test)]

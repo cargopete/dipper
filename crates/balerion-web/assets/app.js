@@ -697,16 +697,38 @@ el.castCopy.addEventListener("click", async () => {
   }
 });
 
+/** `S01E03`, when the filename said so. */
+function episodeLabel(file) {
+  if (file.season === null || file.episode === null) return null;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `S${pad(file.season)}E${pad(file.episode)}`;
+}
+
 function renderFiles() {
   el.files.replaceChildren();
 
-  for (const file of current.files) {
+  /* Episodes in order, everything else after them in the order the torrent
+   * lists it. A season pack's files are frequently not in episode order, and
+   * "the next one" should be the next one. */
+  const ordered = [...current.files].sort((a, b) => {
+    const ae = episodeLabel(a);
+    const be = episodeLabel(b);
+    if (ae && be) return a.season - b.season || a.episode - b.episode;
+    if (ae) return -1;
+    if (be) return 1;
+    return a.index - b.index;
+  });
+
+  for (const file of ordered) {
     const row = document.createElement("li");
 
     const name = document.createElement("div");
     name.className = "file-name";
     const title = document.createElement("span");
-    title.textContent = file.name;
+    const label = episodeLabel(file);
+    /* The episode number in front, because in a pack it is the only part of the
+     * name that differs and it is buried in the middle of it. */
+    title.textContent = label ? `${label}  ${file.name}` : file.name;
     if (file.index === playing) {
       title.className = "playing";
       title.textContent = `${file.name} (playing)`;

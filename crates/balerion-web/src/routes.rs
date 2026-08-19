@@ -74,6 +74,10 @@ pub struct FileInfo {
     pub playable: bool,
     pub kind: &'static str,
     pub reason: Option<&'static str>,
+    /// Read out of the filename when it says, so a season pack can be listed as
+    /// episodes rather than as thirteen nearly identical names.
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,8 +101,14 @@ fn describe(meta: &Metainfo, kept: bool) -> TorrentInfo {
         .enumerate()
         .map(|(index, file)| {
             let media = media::classify(&file.path);
+            let (season, episode) = match media::episode_of(&file.path) {
+                Some((season, episode)) => (Some(season), Some(episode)),
+                None => (None, None),
+            };
             FileInfo {
                 index,
+                season,
+                episode,
                 path: file.path.clone(),
                 name: file
                     .path
