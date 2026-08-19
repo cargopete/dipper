@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.torrent
 .DS_Store
+.vercel
+.env*
