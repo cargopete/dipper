@@ -755,7 +755,9 @@ where
 /// Fills every free slot from the queue, waits for whichever worker finishes
 /// first, and fills again. A worker that ended cleanly goes back in the queue
 /// because it is a peer that demonstrably talks to us; one that ended with an
-/// error is left where it fell.
+/// error is dropped and not retried here. A later [`SessionHandle::add_peers`]
+/// may still offer that address again, which is deliberate (a peer that refused
+/// five minutes ago may not refuse now) and bounded by [`MAX_PEER_ATTEMPTS`].
 ///
 /// Gives up when the queue is empty, nothing is connected, and nobody has
 /// offered more addresses within `peer_refill_grace`. That last condition is
