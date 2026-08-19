@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Keeps the player running, so a Watch link from the search site always has
+  something to open.
+
+  This is the reason it exists: the site's Watch button points at
+  http://127.0.0.1:8080, and a browser's answer to nothing listening there is
+  ERR_CONNECTION_REFUSED, which looks like a broken link rather than a stopped
+  process.
+
+  Unlike the relay, this one does hold a torrent session and write to disk. It
+  sweeps torrents nobody has watched for fifteen minutes, so leaving it running
+  does not quietly accumulate gigabytes, but it is a BitTorrent client running at
+  login and that is worth knowing rather than discovering.
+
+  Loopback only, which is the default and deliberately not changed here: this
+  endpoint downloads whatever magnet it is handed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.balerion.serve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BINARY__</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>__PORT__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOGDIR__/serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOGDIR__/serve.err.log</string>
+</dict>
+</plist>

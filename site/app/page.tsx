@@ -97,8 +97,11 @@ function toRows(index: "ia" | "tpb", data: Record<string, unknown>): Row[] {
 
 export default function Page() {
   const [indexes, setIndexes] = useState<IndexInfo[]>([]);
-  const [index, setIndex] = useState<"ia" | "tpb">("ia");
-  const [filter, setFilter] = useState("prelinger");
+  /* apibay first: it is what this is actually used for. The Archive is the
+     safer index and the second choice, which is a different claim from being the
+     default one. */
+  const [index, setIndex] = useState<"ia" | "tpb">("tpb");
+  const [filter, setFilter] = useState("video");
   const [terms, setTerms] = useState("");
   const [thin, setThin] = useState(false);
   const [rows, setRows] = useState<Row[] | null>(null);

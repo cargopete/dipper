@@ -17,20 +17,10 @@ import { RelayError, relayConfig, relayFetch } from "../../../lib/relay";
 function catalogue() {
   return NextResponse.json({
     relayConfigured: relayConfig() !== null,
+    // Ordered as the menu shows them, apibay first: it is what this is used for.
+    // The Archive is the safer index and the second choice, which is a different
+    // claim from being the default one.
     indexes: [
-      {
-        key: "ia",
-        label: "Internet Archive",
-        reachable: true,
-        filterLabel: "Collection",
-        options: archive.SHELVES.map((shelf) => ({
-          key: shelf.key,
-          label: shelf.label,
-          note: shelf.note,
-          thinCap: null,
-        })),
-        note: null,
-      },
       {
         key: "tpb",
         label: "apibay",
@@ -46,6 +36,19 @@ function catalogue() {
           "A public index of whatever strangers uploaded. Most of it is copyrighted, none of " +
           "it is cleared, and the category is not a licence. Your connection, your " +
           "jurisdiction, your problem.",
+      },
+      {
+        key: "ia",
+        label: "Internet Archive",
+        reachable: true,
+        filterLabel: "Collection",
+        options: archive.SHELVES.map((shelf) => ({
+          key: shelf.key,
+          label: shelf.label,
+          note: shelf.note,
+          thinCap: null,
+        })),
+        note: null,
       },
     ],
   });
