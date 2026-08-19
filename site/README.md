@@ -93,12 +93,39 @@ fallback for anything that is not a Vercel deployment. Prefer not needing it.
 Without `BALERION_RELAY_URL`, apibay searches answer `503` with a line saying so,
 and the Archive carries on working.
 
-### One warning about where the relay runs
+### Where the relay has to run
 
-It has to run somewhere apibay will answer, which in practice means a domestic
-connection. A VPS is a datacentre and is likely to collect the same `403` Vercel
-does. Test before assuming: one `curl 'https://apibay.org/q.php?q=dune&cat=200'`
-from the box in question settles it.
+Somewhere apibay will answer, which in practice means a domestic connection. This
+was measured rather than assumed:
+
+| From                        | apibay |
+| --------------------------- | ------ |
+| Vercel `iad1`               | 403    |
+| Hetzner `hel1`              | 403    |
+| Hetzner `nbg1`              | 403    |
+| A machine on a home line    | 200    |
+
+So a VPS cannot host this, however convenient it would be for uptime. Test any
+new host before trusting it:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' 'https://apibay.org/q.php?q=dune&cat=200'
+```
+
+`ops/balerion-relay.service` is a systemd **user** unit, which needs no root and
+runs without anyone logged in provided lingering is enabled
+(`loginctl show-user "$USER" | grep Linger`). Install it with:
+
+```sh
+cargo install --path crates/balerion-cli
+cp ops/balerion-relay.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now balerion-relay
+tailscale funnel --bg --https=10000 8090
+```
+
+Funnel only offers 443, 8443 and 10000, so 10000 is there for a machine whose
+other two are already in use. `ops/install-relay.sh` does the equivalent for
+macOS with a launch agent.
 
 ## The category table lives in two places
 

@@ -1,0 +1,35 @@
+[Unit]
+Description=Balerion apibay search relay
+Documentation=https://github.com/cargopete/balerion
+# Wants rather than Requires: a relay that starts before the network is up should
+# keep trying, not give up and stay down until somebody notices.
+Wants=network-online.target
+After=network-online.target
+# These two belong in [Unit], not [Service]. Put in the wrong section systemd
+# ignores them with a warning and Restart=always has nothing bounding it, which
+# is a restart loop waiting for a reason.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# No secret here. The relay verifies Vercel's own OIDC tokens against Vercel's
+# published keys, so the only configuration it needs is public: whose account and
+# which project.
+ExecStart=%h/.cargo/bin/balerion relay --port 8090 --vercel-project nbgn/balerion
+Restart=always
+RestartSec=5
+
+# It reads no files, writes no files and needs nothing beyond outbound HTTPS.
+# Say so, so a future bug has less to work with.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=default.target
