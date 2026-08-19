@@ -8,6 +8,7 @@
 pub mod ffmpeg;
 pub mod fmp4;
 pub mod media;
+pub mod oidc;
 pub mod play;
 pub mod range;
 pub mod relay;

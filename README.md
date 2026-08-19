@@ -232,8 +232,13 @@ feeds it a lying peer.
 
 `site/` is a small Next.js app that deploys Balerion's search half to Vercel,
 password-gated. It finds things and hands over a magnet; it plays nothing,
-because a serverless function cannot hold a swarm open. See
-[site/README.md](site/README.md).
+because a serverless function cannot hold a swarm open.
+
+archive.org is searched from there directly. apibay is not, because it serves a
+Cloudflare bot challenge to datacentre addresses, so those queries go through
+`balerion relay` on a machine with a domestic connection. The relay serves the
+search and nothing else, and authorises callers by verifying Vercel's own OIDC
+tokens, so there is no shared secret. See [site/README.md](site/README.md).
 
 ## Layout
 

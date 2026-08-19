@@ -25,9 +25,24 @@ axum = { version = "0.8", default-features = false, features = [
     "query",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# For fetching Vercel's OIDC key set. rustls rather than the platform TLS stack,
+# for the same reason as everywhere else: one binary you can drop on a box.
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls",
+    "rustls-native-certs",
+] }
 directories = "6"
+# rust_crypto rather than aws_lc_rs: pure Rust, no C toolchain, which is what
+# keeps this a binary you can drop on a box. Without one of the two features the
+# crate panics at the moment it verifies a signature, which no test that feeds it
+# a malformed token will ever reach.
+jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 
 [dev-dependencies]
 tempfile = "3"
 sha1 = "0.11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+base64 = "0.23.1"

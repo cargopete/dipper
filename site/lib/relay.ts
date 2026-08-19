@@ -11,14 +11,36 @@
  * put the bearer token in front of every visitor. So it goes server to server,
  * and the token never leaves Vercel. */
 
-export type RelayConfig = { url: string; token: string };
+export type RelayConfig = { url: string; token: string | null };
 
-/** Configured only when both halves are present; half a configuration is none. */
+/**
+ * Where the relay is, and whether a shared token was given for it.
+ *
+ * The URL is the only thing that must be set. A shared token is optional now:
+ * with none, this asks Vercel for an OIDC token instead, which the relay checks
+ * against Vercel's published keys. That is the path worth preferring, because
+ * there is nothing for anybody to copy between two dashboards and get wrong,
+ * and the credential expires on its own.
+ */
 export function relayConfig(): RelayConfig | null {
   const url = process.env.BALERION_RELAY_URL?.trim();
+  if (!url) return null;
   const token = process.env.BALERION_RELAY_TOKEN?.trim();
-  if (!url || !token) return null;
-  return { url: url.replace(/\/+$/, ""), token };
+  return { url: url.replace(/\/+$/, ""), token: token || null };
+}
+
+/**
+ * The bearer credential to present: the shared token if there is one, otherwise
+ * a fresh Vercel OIDC token.
+ *
+ * `getVercelOidcToken` is the supported way in: the environment variable is not
+ * populated at runtime here, which was measured on a live deployment rather than
+ * read in a document.
+ */
+async function credential(config: RelayConfig): Promise<string> {
+  if (config.token) return config.token;
+  const { getVercelOidcToken } = await import("@vercel/functions/oidc");
+  return getVercelOidcToken();
 }
 
 /** Why a relay call failed, in terms a page can put in front of someone. */
@@ -51,10 +73,23 @@ export async function relayFetch(
 ): Promise<unknown> {
   const url = `${config.url}${path}${params.size ? `?${params}` : ""}`;
 
+  let bearer: string;
+  try {
+    bearer = await credential(config);
+  } catch (err) {
+    const because = err instanceof Error ? err.message : "unknown";
+    throw new RelayError(
+      `this deployment could not obtain a credential for the relay (${because}). With no ` +
+        `BALERION_RELAY_TOKEN set it asks Vercel for an OIDC token, which needs OIDC enabled ` +
+        `on the project.`,
+      "unconfigured",
+    );
+  }
+
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: { authorization: `Bearer ${config.token}` },
+      headers: { authorization: `Bearer ${bearer}` },
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -69,8 +104,11 @@ export async function relayFetch(
 
   if (response.status === 401) {
     throw new RelayError(
-      "the relay refused this deployment's token. The value in BALERION_RELAY_TOKEN " +
-        "has to match the one the relay was started with.",
+      config.token
+        ? "the relay refused this deployment's token. BALERION_RELAY_TOKEN has to match the " +
+            "one the relay was started with."
+        : "the relay refused this deployment's Vercel identity. The relay has to be started " +
+            "with --vercel-project pointing at this project, and the environment has to match.",
       "refused",
     );
   }

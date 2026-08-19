@@ -11,10 +11,11 @@
   ThrottleInterval stops a relay that cannot bind its port from being respawned
   in a tight loop for ever.
 
-  The token lives in this file's environment rather than on the command line, so
-  it does not appear in `ps` output for every process on the machine to read.
-  That makes this file a secret: it is written to ~/Library/LaunchAgents and is
-  deliberately not in the repository with a real token in it.
+  There is no secret in here. The relay trusts OIDC tokens from one Vercel
+  project, verified against Vercel's published keys, so the only configuration it
+  needs is public: whose account and which project. A shared token would work too
+  and would be one more thing for somebody to copy between two dashboards and get
+  wrong.
 -->
 <plist version="1.0">
 <dict>
@@ -27,13 +28,9 @@
     <string>relay</string>
     <string>--port</string>
     <string>__PORT__</string>
+    <string>--vercel-project</string>
+    <string>__VERCEL_PROJECT__</string>
   </array>
-
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>BALERION_RELAY_TOKEN</key>
-    <string>__TOKEN__</string>
-  </dict>
 
   <key>RunAtLoad</key>
   <true/>

@@ -27,6 +27,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
+use crate::oidc::{OidcVerifier, VercelIdentity};
 use crate::tpb::{self, SearchParams};
 
 /// How long a relay waits on apibay before giving up.
@@ -39,13 +40,18 @@ const UPSTREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15)
 pub struct RelayConfig {
     pub host: std::net::IpAddr,
     pub port: u16,
-    /// The bearer token every request must carry.
-    pub token: String,
+    /// A shared bearer token, when one is in use. Simple, and something a human
+    /// has to copy between two places without getting it wrong.
+    pub token: Option<String>,
+    /// A Vercel project whose OIDC tokens are accepted instead. Nothing secret
+    /// exists on both sides: these are public facts about whose project it is.
+    pub vercel: Option<VercelIdentity>,
 }
 
 struct RelayState {
     tpb: balerion_tpb::TpbClient,
-    token: String,
+    token: Option<String>,
+    vercel: Option<Arc<OidcVerifier>>,
 }
 
 /// A token comparison that does not leak its answer through timing.
@@ -63,12 +69,40 @@ fn same_token(offered: &str, expected: &str) -> bool {
         == 0
 }
 
-fn authorised(headers: &HeaderMap, expected: &str) -> bool {
+fn bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|offered| same_token(offered.trim(), expected))
+        .map(str::trim)
+}
+
+/// Whether this request may proceed, by any method the relay was given.
+///
+/// The shared token is checked first because it costs nothing; OIDC verification
+/// may fetch a key set. A relay with neither configured never starts, so there
+/// is no path here that returns true by default.
+async fn authorised(headers: &HeaderMap, state: &RelayState) -> bool {
+    let Some(offered) = bearer(headers) else {
+        return false;
+    };
+
+    if let Some(expected) = &state.token
+        && same_token(offered, expected)
+    {
+        return true;
+    }
+
+    if let Some(verifier) = &state.vercel {
+        match verifier.verify(offered).await {
+            Ok(()) => return true,
+            // Logged rather than returned: the caller is told only that it was
+            // refused, while whoever runs the relay can see why.
+            Err(err) => tracing::debug!(%err, "an OIDC token did not verify"),
+        }
+    }
+
+    false
 }
 
 /// Said the same way whatever was wrong, so a caller learns only that it was
@@ -89,7 +123,7 @@ struct Health {
 }
 
 async fn health(State(state): State<Arc<RelayState>>, headers: HeaderMap) -> Response {
-    if !authorised(&headers, &state.token) {
+    if !authorised(&headers, &state).await {
         return refused();
     }
     Json(Health {
@@ -105,7 +139,7 @@ async fn search(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    if !authorised(&headers, &state.token) {
+    if !authorised(&headers, &state).await {
         return refused();
     }
     match tpb::run_search(&state.tpb, &params).await {
@@ -115,7 +149,7 @@ async fn search(
 }
 
 async fn categories(State(state): State<Arc<RelayState>>, headers: HeaderMap) -> Response {
-    if !authorised(&headers, &state.token) {
+    if !authorised(&headers, &state).await {
         return refused();
     }
     tpb::categories().await.into_response()
@@ -131,15 +165,25 @@ fn router(state: Arc<RelayState>) -> Router {
 
 /// Run the relay until interrupted.
 pub async fn serve(config: RelayConfig) -> Result<()> {
-    if config.token.trim().is_empty() {
-        bail!("a relay needs a token; there is no default, because a relay without one is open");
-    }
-    if config.token.len() < 24 {
+    // At least one way in, and never none: a relay that authorises nothing would
+    // be an open door with this machine's connection behind it.
+    if config.token.is_none() && config.vercel.is_none() {
         bail!(
-            "that token is {} characters; use at least 24, since this one is the only thing \
-             standing between the internet and this process",
-            config.token.len()
+            "a relay needs either a shared token or a Vercel project to trust; there is no \
+             default, because a relay without one is open"
         );
+    }
+    if let Some(token) = &config.token {
+        if token.trim().is_empty() {
+            bail!("the shared token is empty; leave it unset rather than blank");
+        }
+        if token.len() < 24 {
+            bail!(
+                "that token is {} characters; use at least 24, since it is one of the only \
+                 things standing between the internet and this process",
+                token.len()
+            );
+        }
     }
 
     let client = balerion_tpb::TpbClient::with_config(balerion_tpb::ClientConfig {
@@ -148,9 +192,24 @@ pub async fn serve(config: RelayConfig) -> Result<()> {
     })
     .context("building the apibay client")?;
 
+    let vercel = match config.vercel {
+        Some(identity) => {
+            println!(
+                "trusting OIDC tokens from Vercel project {}/{} ({})",
+                identity.owner, identity.project, identity.environment
+            );
+            Some(OidcVerifier::new(identity)?)
+        }
+        None => None,
+    };
+    if config.token.is_some() {
+        println!("accepting a shared bearer token");
+    }
+
     let state = Arc::new(RelayState {
         tpb: client,
         token: config.token,
+        vercel,
     });
 
     let address = SocketAddr::new(config.host, config.port);
@@ -204,36 +263,86 @@ mod tests {
         assert!(!same_token(&"x".repeat(32), "xxxx"));
     }
 
-    #[test]
-    fn only_a_bearer_header_authorises() {
-        let expected = "t".repeat(32);
+    fn header(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        assert!(!authorised(&headers, &expected), "no header at all");
+        headers.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+        headers
+    }
 
-        headers.insert(axum::http::header::AUTHORIZATION, expected.parse().unwrap());
-        assert!(!authorised(&headers, &expected), "bare token, no scheme");
-
-        headers.insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {expected}").parse().unwrap(),
+    #[test]
+    fn only_the_bearer_scheme_yields_a_token() {
+        let token = "t".repeat(32);
+        assert_eq!(bearer(&HeaderMap::new()), None, "no header at all");
+        assert_eq!(bearer(&header(&token)), None, "bare token, no scheme");
+        assert_eq!(
+            bearer(&header(&format!("Bearer {token}"))),
+            Some(token.as_str())
         );
-        assert!(authorised(&headers, &expected));
+        assert_eq!(
+            bearer(&header(&format!("Bearer  {token} "))),
+            Some(token.as_str()),
+            "surrounding space is forgiven"
+        );
+    }
+
+    fn state(token: Option<&str>) -> RelayState {
+        RelayState {
+            tpb: balerion_tpb::TpbClient::new().unwrap(),
+            token: token.map(str::to_string),
+            vercel: None,
+        }
     }
 
     #[tokio::test]
-    async fn a_relay_refuses_to_start_without_a_usable_token() {
+    async fn the_shared_token_authorises_and_nothing_else_does() {
+        let token = "t".repeat(32);
+        let state = state(Some(&token));
+
+        assert!(authorised(&header(&format!("Bearer {token}")), &state).await);
+        assert!(!authorised(&HeaderMap::new(), &state).await, "no header");
+        assert!(!authorised(&header(&token), &state).await, "no scheme");
+        assert!(
+            !authorised(&header("Bearer wrong-but-the-same-length-aaaa"), &state).await,
+            "wrong token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_with_no_shared_token_refuses_every_token() {
+        // The OIDC-only case. Nothing may pass on the strength of a token the
+        // relay was never given anything to check against.
+        let state = state(None);
+        assert!(!authorised(&header(&format!("Bearer {}", "t".repeat(32))), &state).await);
+    }
+
+    fn config(token: Option<&str>, vercel: Option<VercelIdentity>) -> RelayConfig {
+        RelayConfig {
+            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port: 0,
+            token: token.map(str::to_string),
+            vercel,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_relay_refuses_to_start_with_no_way_in_at_all() {
+        let err = serve(config(None, None)).await.expect_err("should refuse");
+        assert!(
+            err.to_string().contains("token or a Vercel project"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_refuses_a_token_too_short_to_be_worth_having() {
         for token in ["", "   ", "short"] {
-            let err = serve(RelayConfig {
-                host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                port: 0,
-                token: token.to_string(),
-            })
-            .await
-            .expect_err("should refuse");
-            let message = err.to_string();
+            let err = serve(config(Some(token), None))
+                .await
+                .expect_err("should refuse");
             assert!(
-                message.contains("token"),
-                "unhelpful refusal for {token:?}: {message}"
+                err.to_string().contains("token"),
+                "unhelpful refusal for {token:?}: {}",
+                err
             );
         }
     }

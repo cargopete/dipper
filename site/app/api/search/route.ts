@@ -86,8 +86,9 @@ export async function GET(request: Request) {
     return NextResponse.json(
       {
         error:
-          "apibay searches need the relay. Set BALERION_RELAY_URL and BALERION_RELAY_TOKEN " +
-          "on this deployment and point them at the Balerion relay on your own machine.",
+          "apibay searches need the relay. Set BALERION_RELAY_URL on this deployment and " +
+          "point it at a Balerion relay. No token is needed if that relay was started with " +
+          "--vercel-project for this project.",
       },
       { status: 503 },
     );

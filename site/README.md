@@ -48,12 +48,13 @@ stop.
 So apibay queries are forwarded to a relay running on your own machine:
 
 ```sh
-balerion relay --port 8090            # token from BALERION_RELAY_TOKEN
+balerion relay --port 8090 --vercel-project nbgn/balerion
 tailscale funnel --bg 8090            # expose it over HTTPS
 ```
 
-`ops/install-relay.sh` in the repository root installs that relay as a launch
-agent, so it starts at login and comes back if it dies.
+`ops/install-relay.sh nbgn/balerion` installs that relay as a launch agent, so it
+starts at login and comes back if it dies. Killed with `-9`, launchd brings it
+back on a new pid.
 
 The relay is deliberately not the whole server. `balerion serve` has
 `/api/resolve`, which downloads whatever magnet it is handed, and exposing that
@@ -62,15 +63,42 @@ can search and nothing else: no resolve, no file reads, no sight of the torrent
 session. Every route needs a bearer token and there is no default one, so a
 relay started without a token refuses to start.
 
-Two variables point this deployment at it:
+### Nothing to copy between two dashboards
+
+One variable points this deployment at the relay, and it is not a secret:
 
 ```
 BALERION_RELAY_URL=https://your-machine.your-tailnet.ts.net
-BALERION_RELAY_TOKEN=...
 ```
 
-Half a configuration counts as none. Without both, apibay searches answer `503`
-with a line saying so, and the Archive carries on working.
+There is no token, because Vercel already signs a short-lived JWT for its own
+functions and the relay verifies it against Vercel's published keys. Observed
+from a live deployment rather than read in a document:
+
+```text
+iss  https://oidc.vercel.com/<owner>
+aud  https://vercel.com/<owner>
+sub  owner:<owner>:project:<project>:environment:<environment>
+```
+
+The relay checks all four of issuer, audience, subject and expiry. The subject
+matters most: every project in the account gets tokens from the same issuer,
+signed with the same key, so without that check any of them would get in. There
+is a test that signs a token for a different project with the correct key and
+asserts it is refused.
+
+A shared token still works, via `--token` and `BALERION_RELAY_TOKEN`, and is the
+fallback for anything that is not a Vercel deployment. Prefer not needing it.
+
+Without `BALERION_RELAY_URL`, apibay searches answer `503` with a line saying so,
+and the Archive carries on working.
+
+### One warning about where the relay runs
+
+It has to run somewhere apibay will answer, which in practice means a domestic
+connection. A VPS is a datacentre and is likely to collect the same `403` Vercel
+does. Test before assuming: one `curl 'https://apibay.org/q.php?q=dune&cat=200'`
+from the box in question settles it.
 
 ## The category table lives in two places
 

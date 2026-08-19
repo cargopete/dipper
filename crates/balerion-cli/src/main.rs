@@ -195,13 +195,26 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         host: std::net::IpAddr,
 
-        /// The bearer token every request must carry. Read from
+        /// A shared bearer token every request must carry. Read from
         /// BALERION_RELAY_TOKEN when this is not given.
         ///
-        /// There is no default. A relay whose token nobody set would be an open
-        /// door with this machine's connection behind it.
+        /// Simple, and one more secret for somebody to copy between two
+        /// dashboards. Prefer --vercel-project, which needs none.
         #[arg(long)]
         token: Option<String>,
+
+        /// Trust OIDC tokens from a Vercel project, as `owner/project`.
+        ///
+        /// Nothing secret exists on both sides: Vercel signs a short-lived token
+        /// for its own functions, and this checks it against Vercel's published
+        /// keys. Both this and --token may be set; either one gets a caller in.
+        #[arg(long, value_name = "OWNER/PROJECT")]
+        vercel_project: Option<String>,
+
+        /// Which Vercel environment to trust. Only meaningful with
+        /// --vercel-project, and a preview deployment carries a different one.
+        #[arg(long, default_value = "production")]
+        vercel_environment: String,
     },
 
     Serve {
@@ -505,18 +518,31 @@ async fn run(cli: Cli) -> Result<()> {
             download::download_command(&source, output.clone(), &engine.into()).await
         }
 
-        Command::Relay { port, host, token } => {
+        Command::Relay {
+            port,
+            host,
+            token,
+            vercel_project,
+            vercel_environment,
+        } => {
             // Read from the environment when the flag is absent, so a launch
             // agent can carry the token without it appearing in `ps` output for
             // every process on the machine to read.
             let token = token
                 .clone()
                 .or_else(|| std::env::var("BALERION_RELAY_TOKEN").ok())
-                .unwrap_or_default();
+                .filter(|value| !value.trim().is_empty());
+
+            let vercel = match vercel_project.as_deref() {
+                Some(value) => Some(parse_vercel_project(value, vercel_environment)?),
+                None => None,
+            };
+
             balerion_web::relay::serve(balerion_web::relay::RelayConfig {
                 host: *host,
                 port: *port,
                 token,
+                vercel,
             })
             .await?;
             Ok(())
@@ -760,6 +786,27 @@ fn print_item(item: &ItemMetadata, list_files: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Split `owner/project` into the identity the verifier wants.
+///
+/// Spelled out rather than taking two flags: it is one thing copied from one
+/// place, and `nbgn/balerion` is how Vercel itself writes it.
+fn parse_vercel_project(
+    value: &str,
+    environment: &str,
+) -> Result<balerion_web::oidc::VercelIdentity> {
+    let (owner, project) = value
+        .split_once('/')
+        .filter(|(owner, project)| !owner.is_empty() && !project.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("--vercel-project wants owner/project, for example nbgn/balerion")
+        })?;
+    Ok(balerion_web::oidc::VercelIdentity {
+        owner: owner.to_string(),
+        project: project.to_string(),
+        environment: environment.to_string(),
+    })
 }
 
 fn print_torrent(meta: &balerion_ia::Metainfo) {
