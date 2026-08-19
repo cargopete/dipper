@@ -228,6 +228,13 @@ our piece hashes. `Metainfo::from_verified_info_dict` is the only way the
 engine will build a torrent from peer-supplied bytes, and there is a test that
 feeds it a lying peer.
 
+## The search front end
+
+`site/` is a small Next.js app that deploys Balerion's search half to Vercel,
+password-gated. It finds things and hands over a magnet; it plays nothing,
+because a serverless function cannot hold a swarm open. See
+[site/README.md](site/README.md).
+
 ## Layout
 
 | crate | what it does |
