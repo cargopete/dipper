@@ -237,14 +237,27 @@ pub struct Plan {
 
 /// Decide what to do with each stream.
 ///
-/// Video is copied only when it is already H.264, because that is the one
-/// codec every browser decodes. Everything else is re-encoded to a fixed
-/// profile so the MSE codec string is known in advance rather than guessed.
+/// Audio is copied when it is already AAC. Video never is, even when it is
+/// already H.264, and that is the whole of this comment.
+///
+/// A copied stream cannot be cut anywhere except a keyframe. Ask ffmpeg for the
+/// six seconds from 30.0 with `-c:v copy` and it hands back the eight and a bit
+/// seconds from the keyframe at 27.83, because it has no way to produce the
+/// frames in between. Measured on a 23.976fps BluRay rip: 196 frames where 144
+/// were asked for. The audio alongside it is re-encoded and so *is* cut where
+/// asked. The player then places that segment at exactly 30.0, and everything in
+/// it is two seconds adrift of where the timeline says it is, which looks like
+/// sound out of step with picture and behaves like a buffer that never fills.
+///
+/// Re-encoding costs a hardware encoder very little and makes every segment
+/// exactly the length it claims to be. The alternative, cutting segments on
+/// keyframe boundaries instead of fixed six second ones, means variable-length
+/// segments and a keyframe index for the whole file before playback can start.
+/// That is the right answer for a mature player and far too much machinery for
+/// this one.
 pub fn plan(probe: &Probe) -> Plan {
-    let copy_video = probe
-        .video
-        .as_ref()
-        .is_some_and(|video| video.codec == "h264");
+    // Deliberately not `video.codec == "h264"`. See above.
+    let copy_video = false;
     let copy_audio = probe
         .audio
         .as_ref()
@@ -501,14 +514,34 @@ mod tests {
     }
 
     #[test]
-    fn h264_and_aac_are_passed_through_untouched() {
-        // The common case for an MKV: the streams are already fine, only the
-        // container is wrong, so this should cost almost nothing.
+    fn aac_is_passed_through_and_h264_is_not() {
+        // The tempting case: an MKV whose streams are both fine and only the
+        // container is wrong. The audio is indeed free. The video is not, and
+        // copying it is what put sound out of step with picture.
+        //
+        // A copied stream can only be cut at a keyframe, so a six second
+        // segment comes back eight seconds long, while the re-encoded audio
+        // beside it is cut exactly where asked. Measured at 196 frames against
+        // 144 on a real 23.976fps rip.
         let plan = plan(&probe_with(Some("h264"), Some("aac")));
-        assert!(plan.copy_video && plan.copy_audio);
-        // Copied video reports its real profile and level, measured from the
-        // stream, rather than the ceiling the transcode path declares.
-        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640028,mp4a.40.2\"");
+        assert!(
+            !plan.copy_video,
+            "copied video cannot be cut on a segment boundary"
+        );
+        assert!(plan.copy_audio, "aac is already what we would produce");
+        // And so the declared codec is the transcode's ceiling, not the
+        // stream's own profile, because the stream is being re-encoded.
+        assert_eq!(plan.mime, "video/mp4; codecs=\"avc1.640033,mp4a.40.2\"");
+    }
+
+    #[test]
+    fn no_input_is_ever_copied_as_video() {
+        // The invariant the segmenting depends on: every segment is exactly as
+        // long as it claims. Nothing here may quietly reintroduce a copy.
+        for codec in ["h264", "hevc", "mpeg2video", "vp9", "av1", "mpeg4"] {
+            let plan = plan(&probe_with(Some(codec), Some("aac")));
+            assert!(!plan.copy_video, "{codec} was passed through");
+        }
     }
 
     #[test]
