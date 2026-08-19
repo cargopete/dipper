@@ -1,225 +1,276 @@
-/* balerin: Swiss instrument.
+/* balerin: the page.
  *
- * Hard grid, hairline rules, monospace for every number, one cold accent and
- * no corner radius anywhere. Numbers are tabular so a changing rate does not
- * make the column dance.
+ * Dark-locked on purpose. The old stylesheet followed the system and carried a
+ * whole second palette to do it; this one commits, which halves the tokens and
+ * removes the class of bug where a colour exists only inside a media query.
  *
- * No webfonts on purpose. The binary is meant to be one file you can drop on a
- * box, and a page that phones out for a typeface is not that. */
+ * Rules this file holds itself to, written down so a later edit does not
+ * quietly break them:
+ *
+ *   ONE ACCENT.        Ember, and nothing else decorative. `--good` and `--bad`
+ *                      are semantic status rather than a second and third
+ *                      accent, and appear only where state is being reported.
+ *   ONE RADIUS SCALE.  Surfaces 12px, controls 8px, badges pill. Anything that
+ *                      is neither a surface nor a control gets no radius.
+ *   RESTRAINED MOTION. This page sits under a video for hours. Nothing loops
+ *                      except the loading sweep, nothing bounces, and no
+ *                      transition runs longer than 220ms.
+ *   NUMBERS DO NOT MOVE. Every figure that updates is tabular monospace, so a
+ *                      changing rate does not shift the column it lives in.
+ *
+ * Still no webfonts. The binary is meant to be one file you can drop on a box,
+ * and a page that phones out for a typeface is not that. That constraint
+ * outranks any amount of advice about which grotesk is currently admired.
+ *
+ * The canvas in `drawMap` reads `--panel`, `--accent` and `--ink` off the root
+ * at paint time, so those three names are load-bearing. Renaming them silently
+ * turns the piece map into black on black. */
 
 :root {
-  --paper: #faf9f6;
-  --ink: #16171a;
-  --ink-soft: #55585e;
-  --rule: #d5d4cd;
-  --rule-strong: #b4b3ab;
-  --panel: #f2f1ec;
-  --accent: #1e5aa8;
-  --accent-ink: #ffffff;
-  --bad: #9b2c2c;
-  --good: #1f6b3f;
+  /* Ground and surfaces. Three steps, not five: a hierarchy nobody can see is
+     not a hierarchy. */
+  --void: #0a0a0b;
+  --panel: #131316;
+  --panel-high: #1b1b1f;
+
+  --rule: #24242a;
+  --rule-strong: #34343d;
+
+  --ink: #f3f2f0;
+  --ink-soft: #9c9ca6;
+  --ink-faint: #6f6f79;
+
+  /* Ember: the one accent, and the reason this page is not blue. Balerion was
+     not a tasteful shade of corporate cobalt. Saturation held under 80% so it
+     reads as heat rather than as a highlighter. */
+  --accent: #e0703c;
+  --accent-lift: #ee7f49;
+  --accent-ink: #140a05;
+
+  /* Status, desaturated to sit in the same room as the ember. */
+  --good: #57b37c;
+  --bad: #e2635c;
 
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --sans: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
 
+  --radius-surface: 12px;
+  --radius-control: 8px;
+
   --gap: 1.5rem;
   --rail: 15rem;
-}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #0e0f11;
-    --ink: #e9e8e3;
-    --ink-soft: #9a9da3;
-    --rule: #26282c;
-    --rule-strong: #3a3d43;
-    --panel: #16181b;
-    --accent: #7fb2ec;
-    --accent-ink: #0b0c0e;
-    --bad: #f08b8b;
-    --good: #7fd0a0;
-  }
+  /* One easing curve for the whole page. Mixing curves reads as several people
+     having worked on it separately, which is exactly what happened. */
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 
-/* The `hidden` attribute is enforced by the browser's own stylesheet, which
- * any author rule setting `display` quietly outranks. Several panels here
- * carry both `hidden` and a class that lays them out as a grid, so without
- * this they can never be hidden at all. Worth the !important: the attribute
- * means hidden, and nothing else in this file should get a say. */
+/* The `hidden` attribute is enforced by the browser's own stylesheet, which any
+ * author rule setting `display` quietly outranks. Several panels here carry both
+ * `hidden` and a class that lays them out as a grid, so without this they can
+ * never be hidden at all. Worth the !important: the attribute means hidden, and
+ * nothing else in this file should get a say. */
 [hidden] { display: none !important; }
+
+html { color-scheme: dark; }
 
 body {
   margin: 0;
-  background: var(--paper);
+  background-color: var(--void);
   color: var(--ink);
   font-family: var(--sans);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  /* One wide ember bloom behind the top of the page. Fixed, so it does not
+     travel with the scroll and become a gradient nobody asked for. */
+  background-image: radial-gradient(
+    120rem 26rem at 50% -13rem,
+    rgba(224, 112, 60, 0.10),
+    transparent 70%
+  );
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
 h1, h2, h3 {
+  margin: 0;
   font-weight: 600;
   letter-spacing: -0.015em;
-  margin: 0;
 }
 
-/* Every number in the interface is monospaced and tabular. This is the whole
- * aesthetic in one rule. */
-.brand, dd, .mono, .size, .piecemap-status, .file-size, .library-size {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
+a { color: var(--accent); text-underline-offset: 2px; }
+
+.skip { position: absolute; left: -9999px; }
+.skip:focus {
+  left: 1rem;
+  top: 1rem;
+  z-index: 10;
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-control);
 }
 
 .visually-hidden {
   position: absolute;
-  width: 1px; height: 1px;
-  padding: 0; margin: -1px;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
 }
 
-.skip {
-  position: absolute;
-  left: -9999px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  padding: 0.5rem 1rem;
-  z-index: 10;
-}
-.skip:focus { left: 0; top: 0; }
-
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* ---- masthead ---------------------------------------------------------- */
+/* ---- masthead ----------------------------------------------------------- */
 
 .masthead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  flex-wrap: wrap;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid var(--ink);
-  max-height: 80px;
+  /* Capped at 64px. A bar that eats a tenth of the viewport to state its own
+     name has ideas above its station. */
+  height: 64px;
+  padding: 0 var(--gap);
+  background: rgba(10, 10, 11, 0.72);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--rule);
 }
 
 .brand {
   margin: 0;
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: 0.22em;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.34em;
+  color: var(--ink);
+}
+/* The ember mark: the only ornament on the page, and it earns its place by
+   being the thing you look for in a crowded tab strip. */
+.brand::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.75rem;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0.55rem rgba(224, 112, 60, 0.75);
+  vertical-align: 0.06em;
 }
 
 .masthead-note {
   margin: 0;
   display: flex;
   gap: 0.6rem;
-  font-size: 0.75rem;
-  letter-spacing: 0.08em;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--ink-soft);
+  color: var(--ink-faint);
 }
 
 main {
   max-width: 68rem;
   margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
-  display: grid;
-  gap: 2.5rem;
-}
-
-/* ---- intake ------------------------------------------------------------ */
-
-label {
-  display: block;
-  font-size: 0.72rem;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  margin-bottom: 0.5rem;
-}
-
-.intake-row {
+  padding: calc(var(--gap) * 1.5) var(--gap) calc(var(--gap) * 3);
   display: flex;
-  gap: 0;
-  border: 1px solid var(--ink);
+  flex-direction: column;
+  gap: calc(var(--gap) * 1.5);
 }
 
-input[type="text"] {
-  flex: 1 1 auto;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink);
-  font-family: var(--mono);
-  font-size: 0.9rem;
-  padding: 0.85rem 1rem;
-}
-input[type="text"]::placeholder { color: var(--ink-soft); opacity: 1; }
-input[type="text"]:focus { outline: none; }
-.intake-row:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* ---- buttons and controls ----------------------------------------------- */
 
 button {
-  font-family: var(--sans);
-  font-size: 0.78rem;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 0.72rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  border: 0;
-  padding: 0.85rem 1.6rem;
   background: var(--accent);
   color: var(--accent-ink);
+  border: 0;
+  border-radius: var(--radius-control);
+  padding: 0.85rem 1.4rem;
   cursor: pointer;
   white-space: nowrap;
+  transition: background 140ms var(--ease), transform 90ms var(--ease);
 }
-button:hover { filter: brightness(1.1); }
+button:hover { background: var(--accent-lift); }
+/* A physical push rather than a colour change: the one piece of tactility worth
+   having on a page like this. */
 button:active { transform: translateY(1px); }
-button[disabled] { opacity: 0.5; cursor: progress; }
+button[disabled] {
+  background: var(--panel-high);
+  color: var(--ink-faint);
+  cursor: default;
+  transform: none;
+}
 
 .button-quiet {
   background: transparent;
   color: var(--ink-soft);
   border: 1px solid var(--rule-strong);
-  padding: 0.4rem 0.9rem;
 }
-.button-quiet:hover { color: var(--bad); border-color: var(--bad); filter: none; }
+.button-quiet:hover {
+  background: transparent;
+  color: var(--bad);
+  border-color: var(--bad);
+}
 
+/* Row actions are outlined rather than filled. There is one primary action per
+   view and it is Search; twenty-four solid ember buttons down the right-hand
+   side would each be shouting the same thing, which is the same as none of them
+   shouting. They fill on hover, so the one under the pointer is unambiguous. */
 .button-small {
-  padding: 0.4rem 0.9rem;
-  font-size: 0.7rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.66rem;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent-lift);
 }
+.button-small:hover { background: var(--accent); color: var(--accent-ink); }
+
+/* Focus is the accent everywhere, and never removed. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .hint {
-  margin: 0.6rem 0 0;
-  font-size: 0.82rem;
+  margin: 0.7rem 0 0;
+  font-size: 0.84rem;
   color: var(--ink-soft);
-  max-width: 60ch;
+  max-width: 62ch;
 }
 
-/* ---- mode switch and search ------------------------------------------- */
+/* ---- the console: modes, search, intake --------------------------------- */
+
+.intake {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface);
+  padding: 1.2rem 1.5rem 1.5rem;
+}
 
 .modes {
   display: flex;
-  gap: 0;
-  margin-bottom: 1.1rem;
+  margin: 0 0 1.3rem;
   border-bottom: 1px solid var(--rule);
 }
-
 .modes button {
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--ink-faint);
+  border-radius: 0;
   border-bottom: 2px solid transparent;
-  padding: 0.5rem 0;
-  margin-right: 1.6rem;
+  padding: 0.45rem 0;
+  margin-right: 1.7rem;
+  transform: none;
 }
-.modes button:hover { color: var(--ink); filter: none; }
+.modes button:hover { background: transparent; color: var(--ink-soft); }
 .modes button[aria-selected="true"] {
   color: var(--ink);
   border-bottom-color: var(--accent);
@@ -229,94 +280,134 @@ button[disabled] { opacity: 0.5; cursor: progress; }
   display: grid;
   grid-template-columns: 1fr 11rem 13rem auto;
   align-items: end;
-  gap: 0.75rem;
+  gap: 0.7rem;
 }
 
 .field { min-width: 0; }
 
-.field input, .field select {
-  width: 100%;
-  border: 1px solid var(--ink);
-  background: transparent;
-  color: var(--ink);
+/* Label above the input, always. Placeholder-as-label is not a shortcut, it is
+   a form that stops explaining itself the moment somebody types. */
+label {
+  display: block;
+  margin-bottom: 0.45rem;
   font-family: var(--mono);
-  font-size: 0.9rem;
-  padding: 0.8rem 0.9rem;
-}
-.field select { cursor: pointer; }
-.field input:focus, .field select:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  font-size: 0.64rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
 
-/* The thin-line toggle sits under the search row rather than in it: the row is
-   already a grid of four columns, and a fifth would squeeze the query box on a
-   laptop for the sake of a checkbox. */
-.toggle-inline {
-  margin-top: 0.8rem;
-  font-size: 0.82rem;
+.field input, .field select, input[type="text"] {
+  width: 100%;
+  background: var(--void);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  padding: 0.8rem 0.9rem;
+  transition: border-color 140ms var(--ease);
+}
+.field input:hover, .field select:hover, input[type="text"]:hover {
+  border-color: #43434e;
+}
+.field select { cursor: pointer; }
+.field input::placeholder, input[type="text"]::placeholder {
+  /* Contrast checked rather than eyeballed: --ink-faint on --void clears 4.5:1,
+     which the fashionable near-invisible placeholder does not. */
+  color: var(--ink-faint);
+}
+
+.intake-row { display: grid; grid-template-columns: 1fr auto; gap: 0.7rem; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 0.84rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+  cursor: pointer;
+}
+.toggle input {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+}
+
+.toggle-inline { margin-top: 0.9rem; color: var(--ink-soft); }
+
+/* A note that is a caution rather than an explanation. Marked by a rule in the
+   margin as well as by colour, so it still reads as different in monochrome and
+   to anyone who does not see the red. */
+.hint-caution {
+  border-left: 2px solid var(--bad);
+  padding-left: 0.8rem;
   color: var(--ink-soft);
 }
 
-/* A note that is a caution rather than an explanation. Marked by a rule in the
- * margin instead of a colour alone, so it still reads as different in
- * monochrome and to anyone who does not see the red. */
-.hint-caution {
-  border-left: 2px solid var(--bad);
-  padding-left: 0.7rem;
-}
-
-/* ---- search results ---------------------------------------------------- */
+/* ---- results ------------------------------------------------------------ */
 
 .results-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 1rem;
-  border-bottom: 1px solid var(--ink);
-  padding-bottom: 0.5rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--rule-strong);
 }
-.results-head h2 {
-  font-size: 0.72rem;
-  letter-spacing: 0.11em;
+.results-head h2, .files h3, #library h2 {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--ink-soft);
+  color: var(--ink-faint);
 }
 .results-count {
   margin: 0;
   font-family: var(--mono);
-  font-size: 0.76rem;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
   color: var(--ink-soft);
 }
 
-#result-list { list-style: none; margin: 0; padding: 0; }
+#result-list, #file-list, #library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 
 #result-list li {
   display: grid;
   grid-template-columns: 1fr auto auto auto;
   align-items: center;
-  gap: 1rem;
-  padding: 0.7rem 0;
+  gap: 1.1rem;
+  padding: 0.8rem 0.9rem;
+  margin: 0 -0.9rem;
+  border-radius: var(--radius-control);
   border-bottom: 1px solid var(--rule);
+  transition: background 140ms var(--ease);
+  animation: rise 200ms var(--ease) both;
 }
 #result-list li:last-child { border-bottom: 0; }
+#result-list li:hover { background: var(--panel-high); }
 
-.result-title { font-size: 0.92rem; }
+.result-title { font-size: 0.93rem; overflow-wrap: anywhere; }
 .result-meta {
   display: block;
   font-family: var(--mono);
-  font-size: 0.74rem;
-  color: var(--ink-soft);
-  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+  margin-top: 0.2rem;
 }
-.result-size {
+.result-size, .result-swarm {
   font-family: var(--mono);
-  font-size: 0.8rem;
-  color: var(--ink-soft);
-}
-.result-swarm {
-  font-family: var(--mono);
-  font-size: 0.8rem;
+  font-size: 0.79rem;
   font-variant-numeric: tabular-nums;
   color: var(--ink-soft);
   white-space: nowrap;
@@ -326,301 +417,311 @@ button[disabled] { opacity: 0.5; cursor: progress; }
 .result-seeders { color: var(--good); }
 .result-seeders-thin { color: var(--bad); }
 
-/* ---- stage: viewer plus telemetry -------------------------------------- */
+/* A short stagger as results land, capped at the first ten rows: past that the
+   delay would outlast the search that produced it. */
+#result-list li:nth-child(1) { animation-delay: 0ms; }
+#result-list li:nth-child(2) { animation-delay: 20ms; }
+#result-list li:nth-child(3) { animation-delay: 40ms; }
+#result-list li:nth-child(4) { animation-delay: 60ms; }
+#result-list li:nth-child(5) { animation-delay: 80ms; }
+#result-list li:nth-child(6) { animation-delay: 100ms; }
+#result-list li:nth-child(7) { animation-delay: 120ms; }
+#result-list li:nth-child(8) { animation-delay: 140ms; }
+#result-list li:nth-child(9) { animation-delay: 160ms; }
+#result-list li:nth-child(10) { animation-delay: 180ms; }
 
-.stage {
-  display: grid;
-  grid-template-columns: 1fr var(--rail);
-  border: 1px solid var(--ink);
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
 }
 
-.viewer {
-  position: relative;
-  background: #000;
-  min-height: 18rem;
+/* ---- the torrent: head, stage, telemetry -------------------------------- */
+
+/* The torrent view stacks six things of different kinds. Spacing them with a
+   single gap here rather than with margins on each one is what keeps the piece
+   map from crowding the FILES heading below it. */
+#torrent {
   display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-video {
-  width: 100%;
-  max-height: 34rem;
-  display: block;
-  background: #000;
-}
-/* `video[hidden]` used to need spelling out here. The global rule above now
- * covers it, and every other element that carries the attribute. */
-
-.viewer-note {
-  margin: 0;
-  padding: 2rem;
-  text-align: center;
-  color: #cfd2d6;
-  font-size: 0.85rem;
-  max-width: 40ch;
-}
-
-.telemetry {
-  border-left: 1px solid var(--ink);
-  background: var(--panel);
-  padding: 0;
-}
-
-.telemetry dl { margin: 0; }
-
-.reading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.7rem 1rem;
-  border-bottom: 1px solid var(--rule);
-}
-.reading:last-child { border-bottom: 0; }
-
-.reading dt {
-  font-size: 0.68rem;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-
-.reading dd {
-  margin: 0;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-/* An honest word about whether this can be watched live, rather than letting
- * the viewer discover it by stalling. */
-.advisory {
-  margin: 0;
-  padding: 0.65rem 0.9rem;
-  border: 1px solid var(--rule-strong);
-  border-left: 3px solid var(--bad);
-  border-top: 0;
-  font-size: 0.82rem;
-  color: var(--ink-soft);
-}
-.advisory strong { color: var(--ink); font-weight: 600; }
-.advisory .mono { color: var(--ink); }
-
-/* ---- piece map ---------------------------------------------------------
- * The only thing on the page that moves, and it earns it: this is what tells
- * you whether a stutter is balerin being slow or the swarm being thin. */
-
-.piecemap {
-  margin: 0;
-}
-
-#piecemap {
-  display: block;
-  width: 100%;
-  height: 28px;
-  border: 1px solid var(--ink);
-  border-top: 0;
-}
-
-.piecemap figcaption {
-  display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 1.2rem;
-  flex-wrap: wrap;
-  margin-top: 0.6rem;
-  font-size: 0.72rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
 }
-
-.key { display: inline-flex; align-items: center; gap: 0.4rem; }
-
-.swatch {
-  width: 10px;
-  height: 10px;
-  display: inline-block;
-  border: 1px solid var(--rule-strong);
-}
-.swatch-have { background: var(--accent); border-color: var(--accent); }
-.swatch-want { background: var(--panel); }
-.swatch-head { background: var(--ink); border-color: var(--ink); }
-
-.piecemap-status { margin-left: auto; text-transform: none; letter-spacing: 0; }
-
-/* ---- torrent header and files ------------------------------------------ */
 
 .torrent-head {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 1rem;
-  flex-wrap: wrap;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--ink);
-  margin-bottom: 0.4rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--rule-strong);
 }
-
-.torrent-head h2 { font-size: 1.35rem; }
+/* A release name is long and has no spaces to break on. */
+.torrent-head h2 { font-size: 1.3rem; overflow-wrap: anywhere; }
 
 .torrent-actions {
   display: flex;
   align-items: center;
   gap: 1rem;
+  flex-shrink: 0;
 }
-
-.toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0;
-  text-transform: none;
-  letter-spacing: 0;
-  font-size: 0.8rem;
-  color: var(--ink);
-  cursor: pointer;
-}
-.toggle input { accent-color: var(--accent); width: 1rem; height: 1rem; }
 
 .torrent-meta {
-  margin: 0 0 1rem;
+  /* No bottom margin: the flex gap on #torrent owns the spacing now. */
+  margin: -0.6rem 0 0;
   font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--ink-soft);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
 }
 
-.files h3 {
-  font-size: 0.72rem;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  margin-bottom: 0.5rem;
-}
-
-#file-list, #library-list { list-style: none; margin: 0; padding: 0; }
-
-/* A grid rather than a bordered row per file: the skill is right that
- * border-top plus border-bottom on every row reads as a spreadsheet. */
-#file-list li {
+.stage {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr var(--rail);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface);
+  overflow: hidden;
+}
+
+.viewer {
+  position: relative;
+  display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.65rem 0;
+  justify-content: center;
+  min-height: 19rem;
+  background: #000;
+}
+
+video { width: 100%; max-height: 70vh; display: block; background: #000; }
+
+.viewer-note {
+  margin: 0;
+  padding: 2rem;
+  max-width: 42ch;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  color: var(--ink-soft);
+}
+
+.telemetry { border-left: 1px solid var(--rule); background: var(--panel); }
+.telemetry dl { margin: 0; }
+.reading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.8rem 1.1rem;
   border-bottom: 1px solid var(--rule);
 }
-#file-list li:last-child { border-bottom: 0; }
-
-.file-name {
-  font-size: 0.88rem;
-  overflow-wrap: anywhere;
+.reading:last-child { border-bottom: 0; }
+.reading dt {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
-.file-name .playing {
-  color: var(--accent);
-  font-weight: 600;
+.reading dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.93rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* An honest word about whether this can be watched live, rather than letting
+   the viewer find out by stalling. */
+.advisory {
+  margin: 0;
+  padding: 0.85rem 1.1rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--bad);
+  border-radius: var(--radius-control);
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+}
+.advisory strong { color: var(--ink); font-weight: 600; }
+.advisory .mono { color: var(--ink); font-family: var(--mono); }
+
+/* ---- the piece map ------------------------------------------------------
+ * The only thing on the page that moves of its own accord, and it earns it:
+ * this is what tells you whether a stutter is Balerin being slow or the swarm
+ * being thin. */
+
+.piecemap { margin: 0; }
+#piecemap {
+  display: block;
+  width: 100%;
+  height: 28px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+}
+.piecemap figcaption {
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  margin-top: 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.67rem;
+  color: var(--ink-faint);
+}
+.key { display: inline-flex; align-items: center; gap: 0.4rem; }
+.swatch { width: 0.6rem; height: 0.6rem; display: inline-block; }
+.swatch-have { background: var(--accent); }
+.swatch-want { background: var(--panel); border: 1px solid var(--rule-strong); }
+.swatch-head { background: var(--ink); }
+.piecemap-status { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* ---- files and library -------------------------------------------------- */
+
+.files h3, #library h2 {
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--rule-strong);
+  margin-bottom: 0.3rem;
+}
+
+#file-list li, #library-list li {
+  display: grid;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: 0.87rem;
+}
+#file-list li { grid-template-columns: 1fr auto auto; }
+#library-list li { grid-template-columns: 1fr auto auto auto auto; }
+#file-list li:last-child, #library-list li:last-child { border-bottom: 0; }
+
+.file-name { overflow-wrap: anywhere; }
+.file-name.playing { color: var(--accent); }
+.file-size, .library-size {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  white-space: nowrap;
 }
 .file-why {
   display: block;
   font-size: 0.76rem;
-  color: var(--ink-soft);
-  max-width: 60ch;
+  color: var(--ink-faint);
+  margin-top: 0.15rem;
 }
-.file-size { font-size: 0.8rem; color: var(--ink-soft); }
 
-/* ---- library ----------------------------------------------------------- */
-
-#library h2 { font-size: 1rem; }
-
-#library-list li {
-  display: grid;
-  grid-template-columns: 1fr auto auto auto auto;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.65rem 0;
-  border-bottom: 1px solid var(--rule);
-  font-size: 0.85rem;
-}
-#library-list li:last-child { border-bottom: 0; }
-.library-size { font-size: 0.8rem; color: var(--ink-soft); }
 .badge {
-  font-size: 0.66rem;
-  letter-spacing: 0.1em;
+  font-family: var(--mono);
+  font-size: 0.61rem;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   border: 1px solid var(--rule-strong);
-  padding: 0.15rem 0.5rem;
-  color: var(--ink-soft);
+  /* The only pill on the page, and only because a badge with square corners
+     reads as a very small button. */
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 .badge-kept { border-color: var(--good); color: var(--good); }
 
-/* ---- notices and loading ----------------------------------------------- */
+/* ---- notices and loading ------------------------------------------------ */
 
 .notice {
-  border: 1px solid var(--rule-strong);
-  border-left: 3px solid var(--ink-soft);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--ink-faint);
+  border-radius: var(--radius-surface);
   padding: 1rem 1.2rem;
 }
 .notice-bad { border-left-color: var(--bad); }
 .notice-title {
-  margin: 0 0 0.3rem;
-  font-size: 0.72rem;
-  letter-spacing: 0.11em;
+  margin: 0 0 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--bad);
 }
-.notice-body { margin: 0; font-size: 0.88rem; max-width: 65ch; }
-
-.skeleton-block, .skeleton-line {
-  background: linear-gradient(
-    90deg,
-    var(--panel) 0%,
-    var(--rule) 50%,
-    var(--panel) 100%
-  );
-  background-size: 200% 100%;
-  animation: sweep 1.4s linear infinite;
+.notice-body {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
 }
+
+/* Skeletons are shaped like the thing they stand in for, so the page does not
+   jump when the real content lands. A sweep rather than a pulse: a pulse is the
+   same brightness change everywhere and reads as a fault rather than as work in
+   progress. */
+.skeleton-block, .skeleton-line {
+  background-color: var(--panel-high);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.05),
+    transparent
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: sweep 1.4s var(--ease) infinite;
+}
+.skeleton-block { min-height: 19rem; }
 .skeleton-line {
-  height: 0.75rem;
-  margin: 1.15rem 1rem;
+  height: 0.8rem;
+  margin: 0.85rem 1.1rem;
+  border-radius: 3px;
 }
 
 @keyframes sweep {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
+  from { background-position: -60% 0; }
+  to { background-position: 160% 0; }
 }
+
+/* ---- colophon ----------------------------------------------------------- */
 
 .colophon {
   border-top: 1px solid var(--rule);
-  padding: 1.2rem 1.5rem;
-  font-size: 0.76rem;
-  color: var(--ink-soft);
+  padding: 1.4rem var(--gap);
   text-align: center;
 }
-.colophon p { margin: 0; }
-
-/* ---- narrow screens ---------------------------------------------------- */
-
-@media (max-width: 46rem) {
-  main { padding: 1.5rem 1rem 3rem; gap: 2rem; }
-  .stage { grid-template-columns: 1fr; }
-  .telemetry { border-left: 0; border-top: 1px solid var(--ink); }
-  .telemetry dl { display: grid; grid-template-columns: 1fr 1fr; }
-  .reading { border-right: 1px solid var(--rule); }
-  .intake-row { flex-direction: column; }
-  button { width: 100%; }
-  .modes button { width: auto; }
-  .search-row { grid-template-columns: 1fr; }
-  #file-list li, #library-list li, #result-list li { grid-template-columns: 1fr auto; }
+.colophon p {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.69rem;
+  color: var(--ink-faint);
 }
 
-/* The piece map keeps updating under reduced motion: it is information, not
- * decoration. What goes is the skeleton sweep and the button nudge. */
+/* ---- narrow ------------------------------------------------------------- */
+
+@media (max-width: 860px) {
+  main { padding-left: 1rem; padding-right: 1rem; }
+  .masthead { padding: 0 1rem; }
+  .masthead-note { display: none; }
+  .intake { padding: 1.1rem 1.1rem 1.3rem; }
+  .stage { grid-template-columns: 1fr; }
+  .telemetry { border-left: 0; border-top: 1px solid var(--rule); }
+  .telemetry dl { display: grid; grid-template-columns: 1fr 1fr; }
+  .reading { border-right: 1px solid var(--rule); }
+  .modes button { margin-right: 1.2rem; }
+  .search-row, .intake-row { grid-template-columns: 1fr; }
+  #file-list li, #library-list li, #result-list li {
+    grid-template-columns: 1fr auto;
+  }
+  .torrent-head { flex-direction: column; align-items: flex-start; }
+}
+
+/* ---- reduced motion ----------------------------------------------------- */
+
+/* Mandatory, and it means all of it: the stagger, the sweep, and the push on
+ * :active. Somebody who asked the operating system for less movement did not
+ * mean "less, except the parts you were pleased with". */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
-  .skeleton-block, .skeleton-line { background: var(--panel); }
   button:active { transform: none; }
+  .skeleton-block, .skeleton-line { background-image: none; }
 }

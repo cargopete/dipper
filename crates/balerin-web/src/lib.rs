@@ -126,7 +126,7 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
     };
     *state.self_base.lock().expect("self_base lock") = format!("http://{reachable}");
 
-    println!("balerin is serving at http://{bound}");
+    println!("Balerin is serving at http://{bound}");
     if has_ffmpeg {
         println!("ffmpeg found: files browsers cannot open will be converted as they play.");
     } else {

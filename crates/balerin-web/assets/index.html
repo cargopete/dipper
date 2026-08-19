@@ -3,10 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>balerin</title>
+<!-- Dark-locked. The stylesheet has one palette, so telling the browser it has
+     two would only invite it to restyle the form controls for a light page that
+     does not exist. -->
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0b">
+<title>Balerin</title>
 <link rel="stylesheet" href="/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%231e5aa8'/><rect x='3' y='7' width='10' height='2' fill='white'/></svg>">
+<!-- The same ember mark the masthead wears, so the tab and the page agree. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230a0a0b'/><circle cx='8' cy='8' r='3.5' fill='%23e0703c'/></svg>">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -176,7 +181,7 @@
 </main>
 
 <footer class="colophon">
-  <p>balerin runs on your machine. Nothing here is sent to anyone else.</p>
+  <p>Balerin runs on your machine. Nothing here is sent to anyone else.</p>
 </footer>
 
 <script src="/app.js"></script>

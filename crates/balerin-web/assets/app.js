@@ -170,7 +170,7 @@ function bufferedAhead() {
 
 /* ---- the transcoding player --------------------------------------------
  *
- * For containers browsers cannot open, balerin converts on the fly and hands
+ * For containers browsers cannot open, Balerin converts on the fly and hands
  * back fragmented MP4 in six second pieces. Media Source Extensions is the
  * only way to feed a growing stream to a <video> element while keeping the
  * scrubber working.
@@ -986,7 +986,7 @@ function showFilterNote() {
   if (cap) {
     el.thinLabel.textContent = `Fits a thin line (under ${bytes(cap)})`;
     /* The whole torrent is measured, not the file you would actually watch.
-     * balerin only fetches what the player asks for, so a season pack streams
+     * Balerin only fetches what the player asks for, so a season pack streams
      * one episode at a time and is judged here as though you wanted all of it.
      * Said out loud rather than quietly excluding packs, which would be the
      * clever wrong answer. */
@@ -1174,12 +1174,10 @@ el.discard.addEventListener("click", async () => {
   refresh();
 });
 
-// Redraw on resize so the map stays crisp, and on theme change so it stays
-// the right colour.
+// Redraw on resize so the map stays crisp. There is no longer a theme-change
+// listener here: the page is dark-locked, so the colours the canvas reads off
+// the root never change under it.
 window.addEventListener("resize", () => {
-  if (current) refresh();
-});
-window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (current) refresh();
 });
 
