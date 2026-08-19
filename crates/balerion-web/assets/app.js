@@ -561,15 +561,31 @@ async function play(index) {
   el.video.load();
   show(el.video, false);
   show(el.viewerNote, true);
-  el.viewerNote.textContent = "Working out how to play this";
+  const doneWaiting = sayWhileWaiting(el.viewerNote, [
+    { text: "Working out how to play this" },
+    {
+      after: 6_000,
+      text:
+        "Reading the start of the file to see what is in it. Those bytes have to " +
+        "come off the swarm first, so with few peers this is the slow part.",
+    },
+    {
+      after: 45_000,
+      text:
+        "Still waiting for the opening of the file. The piece map below fills in " +
+        "as it arrives; nothing can be said about the video until it does.",
+    },
+  ], () => playing === index);
 
   let info;
   try {
     info = await api(`/api/play/${current.infohash}/${index}`);
   } catch (err) {
+    doneWaiting();
     showViewerNote(err.message);
     return;
   }
+  doneWaiting();
   if (playing !== index) return; // the viewer moved on while we asked
 
   playInfo = info;
@@ -1071,7 +1087,21 @@ async function openTorrent(what) {
   show(el.failure, false);
   show(el.torrent, false);
   show(el.pending, true);
-  el.pendingNote.textContent = "Fetching the file list";
+  const doneWaiting = sayWhileWaiting(el.pendingNote, [
+    { text: "Fetching the file list" },
+    {
+      after: 8_000,
+      text:
+        "Still looking for peers. A magnet carries no file list, so one has to " +
+        "be asked for, and a cold swarm can take a minute to answer.",
+    },
+    {
+      after: 40_000,
+      text:
+        "This swarm is slow to answer. It may have very few peers, or none that " +
+        "will serve the file list. Still trying.",
+    },
+  ], () => ticket === opening);
 
   /* The results have done their job. Leaving two dozen rows above the player
    * pushes it down the page and makes the thing you actually asked for the
@@ -1094,6 +1124,7 @@ async function openTorrent(what) {
     show(el.failure, true);
     el.failureBody.textContent = err.message;
   } finally {
+    doneWaiting();
     // Whatever happened, the spinner goes. Hiding it only on the paths that
     // completed is what left it stranded above a perfectly good player.
     if (ticket === opening) show(el.pending, false);
@@ -1205,6 +1236,33 @@ el.discard.addEventListener("click", async () => {
 window.addEventListener("resize", () => {
   if (current) refresh();
 });
+
+/* ---- waiting -----------------------------------------------------------
+ *
+ * Two waits here are honest but slow, and a static line of text makes a slow
+ * success look exactly like a hang. Both of them are waiting on the swarm, and
+ * both can legitimately take a minute:
+ *
+ *   Resolving  a cold magnet has to get its file list from a peer, and peers
+ *              have to be found first.
+ *   Probing    ffprobe reads the head of the file, which has to arrive off the
+ *              swarm before it can say what is in it.
+ *
+ * So say what is happening and roughly how long is reasonable. Nothing here
+ * changes what the server does; it changes whether you can tell the difference
+ * between working and stuck. */
+function sayWhileWaiting(node, stages, stillWanted) {
+  node.textContent = stages[0].text;
+  const timers = stages.slice(1).map((stage) =>
+    window.setTimeout(() => {
+      /* Guarded, because clicking a second file while the first is still
+       * waiting leaves the first call's timers armed, and they would happily
+       * overwrite the new one's message with the old one's. */
+      if (stillWanted()) node.textContent = stage.text;
+    }, stage.after)
+  );
+  return () => timers.forEach(window.clearTimeout);
+}
 
 /* A magnet handed over in the fragment, so the search site can send you here
  * with something already chosen.
