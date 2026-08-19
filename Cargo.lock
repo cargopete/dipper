@@ -197,7 +197,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-bt"
+name = "balerion-bt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -220,14 +220,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-cli"
+name = "balerion-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "balerin-bt",
- "balerin-ia",
- "balerin-index",
- "balerin-web",
+ "balerion-bt",
+ "balerion-ia",
+ "balerion-index",
+ "balerion-web",
  "clap",
  "directories",
  "indicatif",
@@ -241,11 +241,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-ia"
+name = "balerion-ia"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "balerin-bt",
+ "balerion-bt",
  "hex",
  "reqwest",
  "serde",
@@ -258,7 +258,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-index"
+name = "balerion-index"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -270,7 +270,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-tpb"
+name = "balerion-tpb"
 version = "0.1.0"
 dependencies = [
  "html-escape",
@@ -284,14 +284,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "balerin-web"
+name = "balerion-web"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "balerin-bt",
- "balerin-ia",
- "balerin-tpb",
+ "balerion-bt",
+ "balerion-ia",
+ "balerion-tpb",
  "directories",
  "futures-util",
  "reqwest",

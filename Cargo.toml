@@ -6,15 +6,15 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/cargopete/balerin"
+repository = "https://github.com/cargopete/balerion"
 rust-version = "1.85"
 
 [workspace.dependencies]
-balerin-bt = { path = "crates/balerin-bt", version = "0.1.0" }
-balerin-ia = { path = "crates/balerin-ia", version = "0.1.0" }
-balerin-index = { path = "crates/balerin-index", version = "0.1.0" }
-balerin-tpb = { path = "crates/balerin-tpb", version = "0.1.0" }
-balerin-web = { path = "crates/balerin-web", version = "0.1.0" }
+balerion-bt = { path = "crates/balerion-bt", version = "0.1.0" }
+balerion-ia = { path = "crates/balerion-ia", version = "0.1.0" }
+balerion-index = { path = "crates/balerion-index", version = "0.1.0" }
+balerion-tpb = { path = "crates/balerion-tpb", version = "0.1.0" }
+balerion-web = { path = "crates/balerion-web", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"
