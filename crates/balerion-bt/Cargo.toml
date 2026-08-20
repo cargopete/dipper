@@ -18,6 +18,9 @@ bytes = "1"
 data-encoding = "2"
 hex = "0.4"
 mainline = "7"
+# For the 768-bit modular exponentiation the MSE key exchange needs. Pure
+# Rust, no C toolchain, which is what keeps this a binary you can drop on a box.
+num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = [
     "charset",

@@ -280,6 +280,58 @@ impl Metainfo {
     pub fn magnet_uri(&self) -> String {
         self.magnet().to_uri()
     }
+
+    /// Serialise back to a `.torrent` file.
+    ///
+    /// The info dictionary is spliced in exactly as it arrived rather than
+    /// re-encoded, because re-encoding drops keys we did not understand and
+    /// changes the infohash, which would make the file describe a different
+    /// torrent from the one it sits next to.
+    ///
+    /// The point of writing one at all is that a directory of downloaded bytes
+    /// is otherwise anonymous: without the file list and the piece hashes there
+    /// is no way to say what is in it, and balerion used to have to go back to
+    /// the swarm to find out something it already knew. Any other client can
+    /// read the result, which is the test of whether it is really a torrent
+    /// file or merely our own notes.
+    pub fn to_torrent_bytes(&self) -> Vec<u8> {
+        fn bstr(out: &mut Vec<u8>, value: &[u8]) {
+            out.extend_from_slice(format!("{}:", value.len()).as_bytes());
+            out.extend_from_slice(value);
+        }
+
+        let mut out = vec![b'd'];
+        // Keys in sorted byte order, as bencode requires:
+        // announce, announce-list, info, url-list.
+        if let Some(first) = self.announce.first() {
+            bstr(&mut out, b"announce");
+            bstr(&mut out, first.as_bytes());
+        }
+        if !self.announce.is_empty() {
+            bstr(&mut out, b"announce-list");
+            out.push(b'l');
+            for tracker in &self.announce {
+                // Each tier is a list. One tracker per tier keeps the order we
+                // were given, which is the order they were tried in.
+                out.push(b'l');
+                bstr(&mut out, tracker.as_bytes());
+                out.push(b'e');
+            }
+            out.push(b'e');
+        }
+        bstr(&mut out, b"info");
+        out.extend_from_slice(&self.raw_info);
+        if !self.webseeds.is_empty() {
+            bstr(&mut out, b"url-list");
+            out.push(b'l');
+            for url in &self.webseeds {
+                bstr(&mut out, url.as_bytes());
+            }
+            out.push(b'e');
+        }
+        out.push(b'e');
+        out
+    }
 }
 
 fn parse_files(info: &Dict, name: &str) -> Result<Vec<TorrentFile>> {
@@ -764,5 +816,46 @@ mod tests {
         assert_eq!(magnet.info_hash, meta.info_hash);
         assert_eq!(magnet.display_name.as_deref(), Some("xfetch.pdf"));
         assert_eq!(magnet.trackers, IA_TRACKERS);
+    }
+
+    #[test]
+    fn a_torrent_survives_being_written_out_and_read_back() {
+        // This is what lets a directory of bytes on disk say what it is
+        // without going back to the swarm to ask.
+        let (raw, _) = single_file_torrent();
+        let original = Metainfo::parse(&raw).unwrap();
+
+        let written = original.to_torrent_bytes();
+        let reread = Metainfo::parse(&written).expect("what we wrote is a torrent file");
+
+        // The infohash is the thing that must not move. Everything else is
+        // convenience; this is identity.
+        assert_eq!(reread.info_hash, original.info_hash);
+        assert_eq!(reread.raw_info, original.raw_info);
+        assert_eq!(reread.name, original.name);
+        assert_eq!(reread.total_length, original.total_length);
+        assert_eq!(reread.piece_length, original.piece_length);
+        assert_eq!(reread.pieces, original.pieces);
+        assert_eq!(reread.files.len(), original.files.len());
+        assert_eq!(reread.announce, original.announce);
+        assert_eq!(reread.webseeds, original.webseeds);
+    }
+
+    #[test]
+    fn a_torrent_with_no_trackers_or_webseeds_still_round_trips() {
+        // Everything resolved from a bare magnet looks like this, and an empty
+        // bencode list where a key should be absent is a malformed file.
+        let (_, info) = single_file_torrent();
+        let bare = Metainfo::from_info_dict(&info).unwrap();
+        assert!(bare.announce.is_empty() && bare.webseeds.is_empty());
+
+        let written = bare.to_torrent_bytes();
+        assert!(
+            !written.windows(8).any(|w| w == b"announce"),
+            "no empty key"
+        );
+        let reread = Metainfo::parse(&written).expect("still a torrent file");
+        assert_eq!(reread.info_hash, bare.info_hash);
+        assert_eq!(reread.files.len(), bare.files.len());
     }
 }

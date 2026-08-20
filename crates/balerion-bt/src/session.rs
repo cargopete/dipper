@@ -36,10 +36,36 @@ pub struct DownloadConfig {
     /// clever piece strategy: one request at a time wastes a whole round trip
     /// per 16 KiB.
     pub pipeline_depth: usize,
+    /// How long to wait for a message on a connection that already works.
     pub peer_timeout: Duration,
+    /// How long to spend getting one open in the first place.
+    ///
+    /// Separate from `peer_timeout` because most addresses on a public swarm
+    /// never answer, and with one figure for both jobs each of them holds a
+    /// connection slot for the full read timeout while doing nothing.
+    pub peer_connect_timeout: Duration,
     pub webseed_timeout: Duration,
     /// The port we claim to listen on.
+    ///
+    /// Set this from [`crate::inbound::Inbound::port`] whenever `inbound` is
+    /// present: the listener may have had to take a different port from the one
+    /// it was asked for, and announcing the wrong one is the fault the listener
+    /// exists to fix.
     pub port: u16,
+    /// Retry an obfuscated handshake when a plaintext one is refused.
+    ///
+    /// On by default. The cost is one extra connection to an address that
+    /// accepted a socket and then hung up, which on a public swarm is a great
+    /// many of them; the gain is the peers that will not speak plaintext at
+    /// all, and which are otherwise invisible. Worth turning off when every
+    /// address is known to be friendly, which mostly means in tests.
+    pub use_encryption: bool,
+    /// The shared listening socket, when this process has one.
+    ///
+    /// `None` keeps the old behaviour exactly: outbound connections only. With
+    /// one, peers that cannot be dialled can dial us, which on a public swarm is
+    /// a large fraction of it.
+    pub inbound: Option<crate::inbound::Inbound>,
     /// How to work out what is already on disk.
     pub verify: VerifyPolicy,
     /// Which piece to fetch next. Leave as [`Strategy::Rarest`] unless a
@@ -82,11 +108,24 @@ impl Default for DownloadConfig {
             webseed_tasks: 4,
             pipeline_depth: 16,
             peer_timeout: Duration::from_secs(20),
+            peer_connect_timeout: crate::peer::DEFAULT_CONNECT_TIMEOUT,
             webseed_timeout: Duration::from_secs(60),
             port: 6881,
+            use_encryption: true,
+            inbound: None,
             verify: VerifyPolicy::Auto,
             strategy: Strategy::Rarest,
             peer_refill_grace: Duration::ZERO,
+        }
+    }
+}
+
+impl DownloadConfig {
+    fn timeouts(&self) -> crate::peer::Timeouts {
+        crate::peer::Timeouts {
+            connect: self.peer_connect_timeout,
+            read: self.peer_timeout,
+            encrypt: self.use_encryption,
         }
     }
 }
@@ -567,10 +606,28 @@ pub async fn spawn(
     peers: Vec<std::net::SocketAddr>,
     config: &DownloadConfig,
 ) -> Result<(SessionHandle, JoinHandle<Result<DownloadSummary>>)> {
+    spawn_with_progress(meta, root, peers, config, |_| {}).await
+}
+
+/// The same, but watching it happen.
+///
+/// The progress stream has to be drained by somebody or its channel grows
+/// without bound, so a caller that wants the events costs nothing over one that
+/// does not. `on_progress` runs on the draining task, so keep it quick: it is
+/// between the workers and the only thing emptying their channel.
+pub async fn spawn_with_progress<F>(
+    meta: &Metainfo,
+    root: impl AsRef<Path>,
+    peers: Vec<std::net::SocketAddr>,
+    config: &DownloadConfig,
+    on_progress: F,
+) -> Result<(SessionHandle, JoinHandle<Result<DownloadSummary>>)>
+where
+    F: FnMut(Progress) + Send + 'static,
+{
     let running = start(meta, root, peers, config).await?;
     let handle = running.handle.clone();
-    // Progress still has to be drained or the channel grows without bound.
-    let task = tokio::spawn(async move { finish(running, |_| {}).await });
+    let task = tokio::spawn(async move { finish(running, on_progress).await });
     Ok((handle, task))
 }
 
@@ -666,8 +723,25 @@ async fn start(
         let shared_for_peers = Arc::clone(&shared);
         let queue_for_peers = Arc::clone(&queue);
         let peer_config = config.clone();
+        // Claim this torrent's share of the listening socket, if the process
+        // has one. The claim is handed to the supervisor and released when it
+        // ends, so a swept torrent stops being offered connections.
+        let (claim, incoming) = match &config.inbound {
+            Some(inbound) => {
+                let (claim, rx) = inbound.register(meta.info_hash);
+                (Some(claim), Some(rx))
+            }
+            None => (None, None),
+        };
         tasks.push(tokio::spawn(async move {
-            supervise_peers(queue_for_peers, shared_for_peers, peer_config).await;
+            supervise_peers(
+                queue_for_peers,
+                shared_for_peers,
+                peer_config,
+                incoming,
+                claim,
+            )
+            .await;
         }));
 
         for url in &meta.webseeds {
@@ -763,7 +837,20 @@ where
 /// offered more addresses within `peer_refill_grace`. That last condition is
 /// what stops a dead swarm hanging the caller for ever while still leaving room
 /// for a caller who re-announces to keep the session alive.
-async fn supervise_peers(queue: Arc<PeerQueue>, shared: Arc<Shared>, config: DownloadConfig) {
+///
+/// Peers that dialled us arrive on `incoming` and take slots from the same
+/// budget. They do not extend the grace period on their own: a caller who wants
+/// to sit and wait for someone to find us has to say so by setting one, or a
+/// download with no sources would hang rather than failing.
+async fn supervise_peers(
+    queue: Arc<PeerQueue>,
+    shared: Arc<Shared>,
+    config: DownloadConfig,
+    mut incoming: Option<mpsc::Receiver<crate::inbound::Incoming>>,
+    // Held, not read: dropping it is what tells the listener to stop routing
+    // connections here once this session is over.
+    _claim: Option<crate::inbound::Registration>,
+) {
     let peer_id = generate_peer_id();
     let mut workers: JoinSet<std::net::SocketAddr> = JoinSet::new();
 
@@ -772,8 +859,9 @@ async fn supervise_peers(queue: Arc<PeerQueue>, shared: Arc<Shared>, config: Dow
             let Some(addr) = queue.pop() else { break };
             let shared = Arc::clone(&shared);
             let config = config.clone();
+            let queue = Arc::clone(&queue);
             workers.spawn(async move {
-                let reason = match run_peer(addr, peer_id, &shared, &config).await {
+                let reason = match run_peer(addr, peer_id, &shared, &config, &queue).await {
                     Ok(()) => "finished".to_string(),
                     Err(err) => err.to_string(),
                 };
@@ -790,18 +878,43 @@ async fn supervise_peers(queue: Arc<PeerQueue>, shared: Arc<Shared>, config: Dow
         }
 
         if workers.is_empty() {
-            // Nothing connected and nothing left to try. Wait to be given more.
-            let waited = tokio::time::timeout(config.peer_refill_grace, queue.added.notified());
-            if waited.await.is_err() {
-                tracing::debug!("no peers left to try and none offered; stopping the peer search");
-                return;
+            // Nothing connected and nothing left to try. Wait to be given more,
+            // by a caller re-announcing or by somebody dialling us.
+            let arrival = tokio::time::timeout(config.peer_refill_grace, async {
+                match incoming.as_mut() {
+                    Some(rx) => {
+                        tokio::select! {
+                            () = queue.added.notified() => None,
+                            connection = rx.recv() => connection,
+                        }
+                    }
+                    None => {
+                        queue.added.notified().await;
+                        None
+                    }
+                }
+            })
+            .await;
+
+            match arrival {
+                Err(_) => {
+                    tracing::debug!(
+                        "no peers left to try and none offered; stopping the peer search"
+                    );
+                    return;
+                }
+                Ok(Some(connection)) => {
+                    spawn_incoming(&mut workers, connection, peer_id, &shared, &config, &queue);
+                }
+                Ok(None) => {}
             }
             continue;
         }
 
         // Slots are full, or the queue is empty and some workers are still
         // going. Either way the next thing to react to is whichever comes
-        // first: a worker ending, or fresh addresses arriving.
+        // first: a worker ending, fresh addresses arriving, or someone dialling
+        // us.
         tokio::select! {
             finished = workers.join_next() => {
                 if let Some(Ok(addr)) = finished
@@ -811,8 +924,55 @@ async fn supervise_peers(queue: Arc<PeerQueue>, shared: Arc<Shared>, config: Dow
                 }
             }
             () = queue.added.notified() => {}
+            connection = next_incoming(&mut incoming), if workers.len() < config.max_peers => {
+                if let Some(connection) = connection {
+                    spawn_incoming(&mut workers, connection, peer_id, &shared, &config, &queue);
+                }
+            }
         }
     }
+}
+
+/// The next peer to dial us, or never, when this process is not listening.
+///
+/// `pending` rather than an early return, because this is a `select!` arm: an
+/// arm that resolves immediately to "nothing" would spin the loop.
+async fn next_incoming(
+    rx: &mut Option<mpsc::Receiver<crate::inbound::Incoming>>,
+) -> Option<crate::inbound::Incoming> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Put an accepted connection to work in the same pool as the dialled ones.
+fn spawn_incoming(
+    workers: &mut JoinSet<std::net::SocketAddr>,
+    connection: crate::inbound::Incoming,
+    peer_id: [u8; 20],
+    shared: &Arc<Shared>,
+    config: &DownloadConfig,
+    queue: &Arc<PeerQueue>,
+) {
+    let addr = connection.addr;
+    let shared = Arc::clone(shared);
+    let config = config.clone();
+    let queue = Arc::clone(queue);
+    workers.spawn(async move {
+        let reason = match run_incoming(connection, peer_id, &shared, &config, &queue).await {
+            Ok(()) => "finished".to_string(),
+            Err(err) => err.to_string(),
+        };
+        let _ = shared.progress.send(Progress::PeerLost {
+            addr: addr.to_string(),
+            reason,
+        });
+        // Never requeued. The address we saw is the port their connection came
+        // *from*, which is ephemeral and is not the port they listen on, so
+        // dialling it back later would reach nobody.
+        UNUSABLE
+    });
 }
 
 /// Stands in for "this address is not worth another go" in a worker's join
@@ -821,21 +981,82 @@ const UNUSABLE: std::net::SocketAddr =
     std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0);
 
 /// One peer, from connect to exhaustion.
+///
+/// `queue` is here so that peers this one introduces us to over BEP 11 go
+/// straight back into the pool of addresses to try. On a public swarm that is
+/// frequently where the useful peer comes from: most of what a tracker names is
+/// unreachable, and the members of a swarm know each other rather better than
+/// the tracker does.
 async fn run_peer(
     addr: std::net::SocketAddr,
     peer_id: [u8; 20],
     shared: &Shared,
     config: &DownloadConfig,
+    queue: &PeerQueue,
 ) -> Result<()> {
-    let mut peer = PeerConnection::connect(
+    let peer = PeerConnection::connect(
         addr,
         shared.meta.info_hash,
         peer_id,
         config.port,
-        config.peer_timeout,
+        config.timeouts(),
     )
     .await?;
+    drive_peer(peer, shared, config, queue).await
+}
+
+/// The same, for a peer that dialled us instead.
+///
+/// Worth having at all because a peer behind a NAT can reach us and cannot be
+/// reached, so without this half a public swarm is invisible in both directions
+/// at once.
+async fn run_incoming(
+    incoming: crate::inbound::Incoming,
+    peer_id: [u8; 20],
+    shared: &Shared,
+    config: &DownloadConfig,
+    queue: &PeerQueue,
+) -> Result<()> {
+    let peer = PeerConnection::accept(
+        incoming,
+        shared.meta.info_hash,
+        peer_id,
+        config.port,
+        config.timeouts(),
+    )
+    .await?;
+    drive_peer(peer, shared, config, queue).await
+}
+
+/// Everything after the handshake, whichever side made the connection.
+async fn drive_peer(
+    mut peer: PeerConnection,
+    shared: &Shared,
+    config: &DownloadConfig,
+    queue: &PeerQueue,
+) -> Result<()> {
     peer.set_piece_count(shared.meta.piece_count())?;
+    let outcome = trade_with(&mut peer, shared, config, queue).await;
+
+    // Take this peer's pieces back out of the availability counts, whatever
+    // happened. `peer.have` has been kept current by every `Have` message that
+    // arrived, so the bitfield removed here is the one that was counted in.
+    // Skipping this is how a swarm that has churned all evening ends up
+    // believing every piece is equally common, and rarest-first quietly stops
+    // being rarest-first.
+    if let Some(have) = &peer.have {
+        shared.picker.lock().await.remove_peer(have);
+    }
+    outcome
+}
+
+async fn trade_with(
+    peer: &mut PeerConnection,
+    shared: &Shared,
+    config: &DownloadConfig,
+    queue: &PeerQueue,
+) -> Result<()> {
+    let addr = peer.addr;
     // Counted from here rather than from `connect`, so the live figure means
     // "peers actually trading with us" rather than "sockets we opened".
     let _counted = PeerCount::new(&shared.stats);
@@ -852,6 +1073,17 @@ async fn run_peer(
     let mut idle_rounds = 0u32;
     let mut bad_pieces = 0u32;
     loop {
+        // Anything this peer has told us about since the last pass. Done here
+        // rather than at each `recv` because every message arrives through one,
+        // including the ones inside `fetch_piece_from_peer`.
+        let introduced = peer.take_pex_peers();
+        if !introduced.is_empty() {
+            let fresh = queue.push(introduced);
+            if fresh > 0 {
+                tracing::debug!(%addr, fresh, "peer exchange offered addresses we had not tried");
+            }
+        }
+
         if shared.is_complete().await {
             return Ok(());
         }
@@ -859,7 +1091,8 @@ async fn run_peer(
         // While choked, keep reading: `unchoke`, `have` and `bitfield` all
         // arrive on the same stream and all matter.
         if peer.peer_choking {
-            peer.recv(config.peer_timeout).await?;
+            let message = peer.recv(config.peer_timeout).await?;
+            note_have(&message, shared).await;
             continue;
         }
 
@@ -878,12 +1111,13 @@ async fn run_peer(
             if idle_rounds > 3 {
                 return Ok(());
             }
-            peer.recv(config.peer_timeout).await?;
+            let message = peer.recv(config.peer_timeout).await?;
+            note_have(&message, shared).await;
             continue;
         };
         idle_rounds = 0;
 
-        match fetch_piece_from_peer(&mut peer, shared, index, config).await {
+        match fetch_piece_from_peer(peer, shared, index, config).await {
             Ok(Some(data)) => {
                 if !shared
                     .accept(index, &data, PieceSource::Peer(addr.to_string()))
@@ -909,6 +1143,21 @@ async fn run_peer(
                 return Err(err);
             }
         }
+    }
+}
+
+/// Keep the picker's availability counts in step with a `have` message.
+///
+/// Every path that reads from a peer has to do this, not just the one inside
+/// [`fetch_piece_from_peer`]: the connection updates its own bitfield on every
+/// message, and if the picker does not hear about the same pieces then the
+/// removal when the peer leaves subtracts counts that were never added. The
+/// subtraction saturates rather than wrapping, so the failure is a drift in
+/// rarest-first rather than a panic, which is precisely the sort of fault that
+/// goes unnoticed for a year.
+async fn note_have(message: &Message, shared: &Shared) {
+    if let Message::Have(index) = message {
+        shared.picker.lock().await.peer_has(*index as usize);
     }
 }
 

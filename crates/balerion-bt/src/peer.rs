@@ -11,18 +11,81 @@ use tokio_util::codec::Framed;
 
 use crate::error::{Error, Result};
 use crate::extended::{
-    ExtendedHandshake, HANDSHAKE_ID, MetadataAssembler, MetadataMessage, OUR_UT_METADATA_ID,
+    ExtendedHandshake, HANDSHAKE_ID, MAX_PEX_ADDED, MetadataAssembler, MetadataMessage,
+    OUR_UT_METADATA_ID, OUR_UT_PEX_ID, PexMessage,
 };
 use crate::infohash::InfoHash;
 use crate::metainfo::Metainfo;
+use crate::mse::{self, PeerStream};
 use crate::wire::{Bitfield, Handshake, Message, MessageCodec};
 
 /// How long we wait on a peer before deciding it is not interested in us.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long to spend getting a connection open and handshaked.
+///
+/// Much shorter than the read timeout, and separate from it for a reason worth
+/// stating. A tracker will happily name sixty peers of which forty are
+/// unreachable, and with one timeout for both jobs each of those forty holds a
+/// connection slot for the whole of it, doing nothing. Time to first byte on a
+/// cold magnet is dominated by that and by nothing clever in the picker.
+///
+/// Three seconds is generous for a TCP handshake to anywhere that is going to
+/// answer at all, and a peer that accepts the socket and then says nothing is
+/// not one that was about to be useful.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The two waits a peer connection involves, which are not the same wait.
+#[derive(Debug, Clone, Copy)]
+pub struct Timeouts {
+    /// Opening the socket and exchanging handshakes.
+    pub connect: Duration,
+    /// Waiting for the next message on a connection that already works.
+    pub read: Duration,
+    /// Retry with an obfuscated handshake when the plaintext one is refused.
+    pub encrypt: bool,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: DEFAULT_CONNECT_TIMEOUT,
+            read: DEFAULT_TIMEOUT,
+            encrypt: true,
+        }
+    }
+}
+
+/// Did this failure happen *after* the socket opened?
+///
+/// The distinction is the whole basis for retrying with encryption. A connect
+/// timeout or a refused connection means there is nothing at that address, and
+/// dialling it again with a different handshake is a wasted three seconds. A
+/// socket that opened and then closed, or went quiet, during the handshake is
+/// the signature of a peer that will not talk to us in plaintext, and that one
+/// is worth a second attempt.
+fn refused_the_handshake(err: &Error) -> bool {
+    match err {
+        Error::Peer(said) => {
+            !said.contains("connect timed out")
+                && (said.contains("closed the connection")
+                    || said.contains("handshake")
+                    || said.contains("wrong infohash"))
+        }
+        // A read or write that failed on an open socket.
+        Error::Io(err) => matches!(
+            err.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::BrokenPipe
+        ),
+        _ => false,
+    }
+}
+
 /// A connected, handshaken peer.
 pub struct PeerConnection {
-    framed: Framed<TcpStream, MessageCodec>,
+    framed: Framed<PeerStream<TcpStream>, MessageCodec>,
     pub addr: SocketAddr,
     pub handshake: Handshake,
     pub extended: Option<ExtendedHandshake>,
@@ -36,24 +99,68 @@ pub struct PeerConnection {
     pub have: Option<Bitfield>,
     /// Bitfield and `have` messages that arrived before we knew the count.
     pending_have: Vec<Message>,
+    /// Addresses this peer has introduced us to over BEP 11, waiting to be
+    /// collected by whoever is running the connection.
+    pex: Vec<SocketAddr>,
 }
 
 impl PeerConnection {
     /// Connect, handshake, and exchange extended handshakes if both sides
     /// support BEP 10.
+    /// Connect, handshake, and exchange extended handshakes if both sides
+    /// support BEP 10.
+    ///
+    /// Plaintext first, then obfuscated. That order is deliberate and is the
+    /// cheap one: most peers take a plaintext handshake, so the common case
+    /// pays nothing, and a peer configured to require encryption drops the
+    /// connection at the handshake, which is exactly the failure we can detect
+    /// and retry. The other order would cost a round trip and a reconnect
+    /// against every ordinary peer to reach the minority.
     pub async fn connect(
         addr: SocketAddr,
         info_hash: InfoHash,
         peer_id: [u8; 20],
         port: u16,
-        timeout: Duration,
+        timeouts: Timeouts,
     ) -> Result<Self> {
-        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        match Self::connect_plain(addr, info_hash, peer_id, port, timeouts).await {
+            Ok(peer) => Ok(peer),
+            Err(plain) if timeouts.encrypt && refused_the_handshake(&plain) => {
+                tracing::debug!(%addr, %plain, "plaintext refused; trying an obfuscated handshake");
+                Self::connect_encrypted(addr, info_hash, peer_id, port, timeouts)
+                    .await
+                    // The first failure is the more useful one to report: it is
+                    // what a peer that simply is not there also looks like.
+                    .map_err(|encrypted| {
+                        Error::Peer(format!(
+                            "{addr}: plaintext: {plain}; encrypted: {encrypted}"
+                        ))
+                    })
+            }
+            Err(plain) => Err(plain),
+        }
+    }
+
+    async fn connect_plain(
+        addr: SocketAddr,
+        info_hash: InfoHash,
+        peer_id: [u8; 20],
+        port: u16,
+        timeouts: Timeouts,
+    ) -> Result<Self> {
+        let stream = tokio::time::timeout(timeouts.connect, TcpStream::connect(addr))
             .await
             .map_err(|_| Error::Peer(format!("{addr}: connect timed out")))??;
         stream.set_nodelay(true).ok();
 
-        let mut peer = Self::handshake(stream, addr, info_hash, peer_id, timeout).await?;
+        let mut peer = Self::handshake(
+            PeerStream::Plain(stream),
+            addr,
+            info_hash,
+            peer_id,
+            timeouts.connect,
+        )
+        .await?;
 
         if peer.handshake.supports_extended() {
             let ours = ExtendedHandshake::ours(port, None);
@@ -62,13 +169,128 @@ impl PeerConnection {
                 payload: Bytes::from(ours.encode()?),
             })
             .await?;
-            peer.await_extended_handshake(timeout).await?;
+            // Read timeout from here: the connection has demonstrably worked,
+            // and a peer that is thinking about its extension list deserves
+            // longer than one that has not answered a TCP handshake.
+            peer.await_extended_handshake(timeouts.read).await?;
+        }
+        Ok(peer)
+    }
+
+    /// Take over a connection somebody made to us.
+    ///
+    /// The mirror of [`PeerConnection::connect`], and the order is the whole
+    /// difference: the side that dials speaks first, so an accepted peer has
+    /// already sent its handshake (the listener had to read it to know which
+    /// torrent this was for) and is waiting on ours.
+    ///
+    /// We remain leech-only. This peer connected hoping to be served, and will
+    /// not be. What it gives us is a peer we could not have dialled, which on a
+    /// swarm full of NATs is most of them.
+    pub async fn accept(
+        incoming: crate::inbound::Incoming,
+        info_hash: InfoHash,
+        peer_id: [u8; 20],
+        port: u16,
+        timeouts: Timeouts,
+    ) -> Result<Self> {
+        use tokio::io::AsyncWriteExt;
+
+        let crate::inbound::Incoming {
+            mut stream,
+            addr,
+            handshake: theirs,
+        } = incoming;
+
+        // The listener routed by this, so it should already match. Checked
+        // again because this is the place where being wrong means mixing two
+        // torrents' pieces together, and the check is one comparison.
+        if theirs.info_hash != info_hash {
+            return Err(Error::Peer(format!(
+                "{addr}: wrong infohash ({} not {info_hash})",
+                theirs.info_hash
+            )));
+        }
+
+        let ours = Handshake::new(info_hash, peer_id);
+        tokio::time::timeout(timeouts.connect, stream.write_all(&ours.encode()))
+            .await
+            .map_err(|_| Error::Peer(format!("{addr}: handshake write timed out")))??;
+
+        let mut peer = Self {
+            framed: Framed::new(PeerStream::Plain(stream), MessageCodec),
+            addr,
+            handshake: theirs,
+            extended: None,
+            peer_choking: true,
+            peer_interested: false,
+            am_choking: true,
+            am_interested: false,
+            have: None,
+            pending_have: Vec::new(),
+            pex: Vec::new(),
+        };
+
+        if peer.handshake.supports_extended() {
+            let ours = ExtendedHandshake::ours(port, None);
+            peer.send(Message::Extended {
+                id: HANDSHAKE_ID,
+                payload: Bytes::from(ours.encode()?),
+            })
+            .await?;
+            peer.await_extended_handshake(timeouts.read).await?;
+        }
+        Ok(peer)
+    }
+
+    /// The same, over an obfuscated stream.
+    ///
+    /// A second connection rather than a retry on the first: by the time a
+    /// plaintext handshake has failed the socket has our unencrypted bytes on
+    /// it and the other side has hung up, so there is nothing to reuse.
+    async fn connect_encrypted(
+        addr: SocketAddr,
+        info_hash: InfoHash,
+        peer_id: [u8; 20],
+        port: u16,
+        timeouts: Timeouts,
+    ) -> Result<Self> {
+        let stream = tokio::time::timeout(timeouts.connect, TcpStream::connect(addr))
+            .await
+            .map_err(|_| Error::Peer(format!("{addr}: connect timed out")))??;
+        stream.set_nodelay(true).ok();
+
+        let encrypted = tokio::time::timeout(
+            timeouts.connect,
+            mse::handshake_outgoing(stream, info_hash, addr),
+        )
+        .await
+        .map_err(|_| Error::Peer(format!("{addr}: the obfuscated handshake timed out")))??;
+
+        let mut peer = Self::handshake(
+            PeerStream::Encrypted(Box::new(encrypted)),
+            addr,
+            info_hash,
+            peer_id,
+            timeouts.connect,
+        )
+        .await?;
+        tracing::debug!(%addr, "connected over an obfuscated stream");
+
+        if peer.handshake.supports_extended() {
+            let ours = ExtendedHandshake::ours(port, None);
+            peer.send(Message::Extended {
+                id: HANDSHAKE_ID,
+                payload: Bytes::from(ours.encode()?),
+            })
+            .await?;
+            peer.await_extended_handshake(timeouts.read).await?;
         }
         Ok(peer)
     }
 
     async fn handshake(
-        mut stream: TcpStream,
+        mut stream: PeerStream<TcpStream>,
         addr: SocketAddr,
         info_hash: InfoHash,
         peer_id: [u8; 20],
@@ -107,6 +329,7 @@ impl PeerConnection {
             am_interested: false,
             have: None,
             pending_have: Vec::new(),
+            pex: Vec::new(),
         })
     }
 
@@ -159,8 +382,33 @@ impl PeerConnection {
                 Some(have) => have.set(*index as usize),
                 None => self.pending_have.push(message),
             },
+            // BEP 11. The id is ours because we are the receiving side: we
+            // advertised `ut_pex` on OUR_UT_PEX_ID in our own handshake, so
+            // that is the id a peer sends it back on.
+            Message::Extended {
+                id: OUR_UT_PEX_ID,
+                payload,
+            } => match PexMessage::decode(payload) {
+                Ok(message) => {
+                    // Bounded even if a peer sends these faster than the
+                    // session drains them.
+                    let room = MAX_PEX_ADDED.saturating_sub(self.pex.len());
+                    self.pex.extend(message.added.into_iter().take(room));
+                }
+                // A peer sending nonsense here is not worth dropping over: it
+                // is still perfectly capable of sending us pieces.
+                Err(err) => tracing::debug!(addr = %self.addr, %err, "unreadable ut_pex"),
+            },
             _ => {}
         }
+    }
+
+    /// Take the addresses this peer has introduced us to since the last call.
+    ///
+    /// Drained rather than read, because the caller's job is to hand them to
+    /// the peer queue and holding a second copy here would only go stale.
+    pub fn take_pex_peers(&mut self) -> Vec<SocketAddr> {
+        std::mem::take(&mut self.pex)
     }
 
     /// Once metadata is in hand we know the piece count, so the buffered
@@ -299,6 +547,33 @@ pub async fn fetch_metadata_from_peers(
     port: u16,
     concurrency: usize,
 ) -> Result<(Metainfo, SocketAddr)> {
+    fetch_metadata_collecting(
+        peers,
+        info_hash,
+        peer_id,
+        port,
+        concurrency,
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// The same search, keeping the addresses the peers we spoke to introduced us
+/// to along the way.
+///
+/// Worth the extra parameter for the case this whole path exists to survive: a
+/// swarm where the peers a tracker names will send data but will not answer a
+/// metadata request. Such a peer usually knows one that will, and without this
+/// its introductions die with the connection and the next sweep starts from the
+/// same exhausted list.
+pub async fn fetch_metadata_collecting(
+    peers: &[SocketAddr],
+    info_hash: InfoHash,
+    peer_id: [u8; 20],
+    port: u16,
+    concurrency: usize,
+    introduced: &mut Vec<SocketAddr>,
+) -> Result<(Metainfo, SocketAddr)> {
     if peers.is_empty() {
         return Err(Error::NoPeers {
             info_hash: info_hash.to_hex(),
@@ -309,22 +584,45 @@ pub async fn fetch_metadata_from_peers(
         let attempts = batch.iter().map(|addr| {
             let addr = *addr;
             async move {
-                let mut peer =
-                    PeerConnection::connect(addr, info_hash, peer_id, port, DEFAULT_TIMEOUT)
-                        .await?;
-                if !peer.supports_metadata() {
-                    return Err(Error::Peer(format!("{addr}: does not serve metadata")));
+                // Each attempt hands back whatever it was told about, whether
+                // or not it produced metadata. A peer that refuses us is still
+                // a peer that knows who else is here.
+                let mut found = Vec::new();
+                let result = async {
+                    let mut peer = PeerConnection::connect(
+                        addr,
+                        info_hash,
+                        peer_id,
+                        port,
+                        Timeouts::default(),
+                    )
+                    .await?;
+                    if !peer.supports_metadata() {
+                        found = peer.take_pex_peers();
+                        return Err(Error::Peer(format!("{addr}: does not serve metadata")));
+                    }
+                    let meta = peer.fetch_metadata(info_hash).await;
+                    found = peer.take_pex_peers();
+                    Ok::<_, Error>((meta?, addr))
                 }
-                let meta = peer.fetch_metadata(info_hash).await?;
-                Ok::<_, Error>((meta, addr))
+                .await;
+                (result, found)
             }
         });
 
-        for result in futures_util::future::join_all(attempts).await {
+        let mut answer = None;
+        for (result, found) in futures_util::future::join_all(attempts).await {
+            introduced.extend(found);
             match result {
-                Ok(found) => return Ok(found),
+                // Collected rather than returned immediately, so the rest of
+                // the batch's introductions are not thrown away with it.
+                Ok(found) if answer.is_none() => answer = Some(found),
+                Ok(_) => {}
                 Err(err) => tracing::debug!(%err, "metadata fetch failed"),
             }
+        }
+        if let Some(found) = answer {
+            return Ok(found);
         }
     }
 
@@ -369,8 +667,37 @@ mod tests {
 
     /// A pretend peer that serves one info dict over BEP 9.
     async fn spawn_fake_peer(info: Vec<u8>, info_hash: InfoHash, metadata_id: u8) -> SocketAddr {
+        spawn_fake_peer_with(info, info_hash, metadata_id, &[]).await
+    }
+
+    /// A bencoded `ut_pex` message announcing `peers` as additions.
+    fn pex_payload(peers: &[SocketAddr]) -> Vec<u8> {
+        let mut compact = Vec::new();
+        for peer in peers {
+            let std::net::IpAddr::V4(ip) = peer.ip() else {
+                panic!("the fixture only speaks IPv4");
+            };
+            compact.extend_from_slice(&ip.octets());
+            compact.extend_from_slice(&peer.port().to_be_bytes());
+        }
+        let mut out = b"d5:added".to_vec();
+        out.extend(format!("{}:", compact.len()).into_bytes());
+        out.extend_from_slice(&compact);
+        out.extend(b"e");
+        out
+    }
+
+    /// The same peer, optionally gossiping about who else is in the swarm
+    /// before it gets down to business.
+    async fn spawn_fake_peer_with(
+        info: Vec<u8>,
+        info_hash: InfoHash,
+        metadata_id: u8,
+        pex: &[SocketAddr],
+    ) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let pex = pex.to_vec();
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -396,6 +723,18 @@ mod tests {
                 })
                 .await
                 .unwrap();
+
+            if !pex.is_empty() {
+                // On the id the *client* advertised, which is the direction
+                // that trips people up.
+                framed
+                    .send(Message::Extended {
+                        id: OUR_UT_PEX_ID,
+                        payload: Bytes::from(pex_payload(&pex)),
+                    })
+                    .await
+                    .unwrap();
+            }
 
             while let Some(Ok(message)) = framed.next().await {
                 let Message::Extended { id, payload } = message else {
@@ -429,15 +768,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_exchange_addresses_survive_the_connection() {
+        // The case this exists for: a swarm where the tracker's addresses are
+        // spent and the only new ones come from a peer we already have open.
+        let info = info_dict();
+        let real = Metainfo::from_info_dict(&info).unwrap().info_hash;
+        let gossip: Vec<SocketAddr> = vec![
+            "10.1.2.3:6881".parse().unwrap(),
+            "10.1.2.4:51413".parse().unwrap(),
+        ];
+        let addr = spawn_fake_peer_with(info, real, 5, &gossip).await;
+
+        let mut introduced = Vec::new();
+        let (meta, _) =
+            fetch_metadata_collecting(&[addr], real, [1u8; 20], 6881, 4, &mut introduced)
+                .await
+                .expect("metadata");
+
+        assert_eq!(meta.info_hash, real);
+        introduced.sort();
+        assert_eq!(introduced, gossip, "the introductions must not be lost");
+    }
+
+    #[tokio::test]
     async fn fetches_metadata_from_a_peer_and_verifies_it() {
         let info = info_dict();
         let real_hash = Metainfo::from_info_dict(&info).unwrap().info_hash;
         // Deliberately not our own id: the peer picks its own, and we must use it.
         let addr = spawn_fake_peer(info.clone(), real_hash, 7).await;
 
-        let mut peer = PeerConnection::connect(addr, real_hash, [1u8; 20], 6881, DEFAULT_TIMEOUT)
-            .await
-            .expect("connects");
+        let mut peer =
+            PeerConnection::connect(addr, real_hash, [1u8; 20], 6881, Timeouts::default())
+                .await
+                .expect("connects");
         assert!(peer.supports_metadata());
         assert_eq!(peer.extended.as_ref().unwrap().ut_metadata_id(), Some(7));
         assert_eq!(
@@ -463,7 +826,7 @@ mod tests {
         lying[pos..pos + 10].copy_from_slice(b"evil-file!");
         let addr = spawn_fake_peer(lying, real, 3).await;
 
-        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, DEFAULT_TIMEOUT)
+        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, Timeouts::default())
             .await
             .unwrap();
         let err = peer.fetch_metadata(real).await.unwrap_err();
@@ -494,7 +857,7 @@ mod tests {
         let real = Metainfo::from_info_dict(&info).unwrap().info_hash;
         let addr = spawn_fake_peer(info, real, 1).await;
 
-        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, DEFAULT_TIMEOUT)
+        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, Timeouts::default())
             .await
             .unwrap();
         let meta = peer.fetch_metadata(real).await.unwrap();
@@ -505,7 +868,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_a_peer_in_a_different_swarm() {
         let addr = spawn_fake_peer(info_dict(), InfoHash::new([9u8; 20]), 1).await;
-        let err = PeerConnection::connect(addr, hash(), [1u8; 20], 6881, DEFAULT_TIMEOUT)
+        let err = PeerConnection::connect(addr, hash(), [1u8; 20], 6881, Timeouts::default())
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("wrong infohash"), "{err}");
@@ -517,7 +880,7 @@ mod tests {
         let real = Metainfo::from_info_dict(&info).unwrap().info_hash;
         let addr = spawn_fake_peer(info, real, 1).await;
 
-        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, DEFAULT_TIMEOUT)
+        let mut peer = PeerConnection::connect(addr, real, [1u8; 20], 6881, Timeouts::default())
             .await
             .unwrap();
         // Pretend a bitfield arrived before we had metadata.

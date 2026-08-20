@@ -10,7 +10,7 @@ use balerion_bt::metainfo::Metainfo;
 use balerion_bt::session::{self, DownloadConfig, Progress};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 const PIECE_LENGTH: usize = 1024;
 
@@ -421,6 +421,10 @@ async fn every_discovered_peer_is_tried_not_just_the_first_batch() {
         // Four times fewer slots than addresses, so passing this test is only
         // possible by refilling them.
         max_peers: 3,
+        // Off, so that this counts dials rather than counting dials times the
+        // number of handshakes we are willing to try. The fallback has its own
+        // test below.
+        use_encryption: false,
         ..Default::default()
     };
     // No webseed and no real peer, so it cannot finish. The failure is the
@@ -436,4 +440,150 @@ async fn every_discovered_peer_is_tried_not_just_the_first_batch() {
     // Each address is worth one attempt when connecting to it fails, so a
     // number well above twelve would mean the supervisor is retrying the dead.
     assert_eq!(dialled.len(), peers.len(), "dialled: {dialled:?}");
+}
+
+#[tokio::test]
+async fn a_peer_that_refuses_plaintext_is_asked_again_with_an_obfuscated_handshake() {
+    // The behaviour encryption buys, and its cost, in one test. A peer that
+    // accepts a socket and hangs up is indistinguishable from one configured to
+    // require encryption, so both are tried twice; that second dial is what
+    // reaches the peers that are otherwise invisible.
+    let files = fixture_files();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.clone()))
+        .collect();
+    let meta = build_torrent(&borrowed);
+
+    let dialled = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let peer = spawn_dead_peer(Arc::clone(&dialled)).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = DownloadConfig {
+        max_peers: 1,
+        use_encryption: true,
+        ..Default::default()
+    };
+    let result = session::download(&meta, dir.path(), vec![peer], &config, |_| {}).await;
+    assert!(result.is_err(), "nothing could supply a piece");
+
+    let dialled = dialled.lock().unwrap().clone();
+    assert_eq!(
+        dialled.len(),
+        2,
+        "once in plaintext and once obfuscated: {dialled:?}"
+    );
+}
+
+/// A seeder that dials *us* and then serves the whole torrent.
+///
+/// Deliberately handshakes without the BEP 10 reserved bit set, so this also
+/// covers the plain BEP 3 path: a peer with no extensions at all still has to
+/// work, and the accept path has its own handshake ordering to get wrong.
+async fn spawn_dialling_seeder(meta: Metainfo, flat: Vec<u8>, port: u16) {
+    use balerion_bt::wire::{HANDSHAKE_LEN, Handshake, Message, MessageCodec};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_util::codec::Framed;
+
+    tokio::spawn(async move {
+        // The listener drops connections for torrents nobody is running, so
+        // keep trying until the session under test has claimed this infohash.
+        let stream = loop {
+            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                continue;
+            };
+            let ours = Handshake {
+                reserved: [0u8; 8],
+                info_hash: meta.info_hash,
+                peer_id: *b"-SEED01-000000000000",
+            };
+            if stream.write_all(&ours.encode()).await.is_err() {
+                continue;
+            }
+            let mut buf = [0u8; HANDSHAKE_LEN];
+            match stream.read_exact(&mut buf).await {
+                Ok(_) => break stream,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+            }
+        };
+
+        let mut framed = Framed::new(stream, MessageCodec);
+
+        // We have everything, and we are not going to make them ask twice.
+        let mut bits = vec![0u8; meta.piece_count().div_ceil(8)];
+        for index in 0..meta.piece_count() {
+            bits[index / 8] |= 0x80 >> (index % 8);
+        }
+        framed.send(Message::Bitfield(bits.into())).await.unwrap();
+        framed.send(Message::Unchoke).await.unwrap();
+
+        while let Some(Ok(message)) = framed.next().await {
+            if let Message::Request {
+                index,
+                begin,
+                length,
+            } = message
+            {
+                let start = index as usize * meta.piece_length as usize + begin as usize;
+                let end = (start + length as usize).min(flat.len());
+                framed
+                    .send(Message::Piece {
+                        index,
+                        begin,
+                        block: bytes::Bytes::copy_from_slice(&flat[start..end]),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_peer_that_dials_us_can_serve_the_whole_torrent() {
+    // Until the listener existed, balerion announced a port nothing was on, so
+    // a peer behind a NAT could reach us and could not be reached, and was
+    // therefore invisible in both directions at once.
+    let files = fixture_files();
+    let borrowed: Vec<(&str, Vec<u8>)> = files
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.clone()))
+        .collect();
+    let meta = build_torrent(&borrowed);
+    let flat: Vec<u8> = files.iter().flat_map(|(_, data)| data.clone()).collect();
+
+    let inbound = balerion_bt::Inbound::bind(0).await.unwrap();
+    spawn_dialling_seeder(meta.clone(), flat.clone(), inbound.port()).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = DownloadConfig {
+        port: inbound.port(),
+        inbound: Some(inbound),
+        // Somebody has to be given time to find us. Without a grace the
+        // session is entitled to give up before the first connection lands,
+        // which is the documented behaviour rather than a bug.
+        peer_refill_grace: std::time::Duration::from_secs(10),
+        ..Default::default()
+    };
+
+    // No addresses to dial and no webseeds: every byte here arrived on a
+    // connection we did not make.
+    let summary = session::download(&meta, dir.path(), vec![], &config, |_| {})
+        .await
+        .expect("the dialling seeder supplied everything");
+
+    assert_eq!(summary.pieces, meta.piece_count());
+    assert_eq!(summary.from_webseeds, 0, "there was no webseed");
+    assert_eq!(summary.from_peers, meta.piece_count());
+
+    for (name, data) in &files {
+        let path = dir.path().join("an-item").join(name);
+        let written =
+            std::fs::read(&path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        assert_eq!(&written, data, "{name} came out wrong");
+    }
 }

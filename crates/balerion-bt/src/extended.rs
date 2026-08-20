@@ -1,13 +1,19 @@
-//! BEP 10 (extension protocol) and BEP 9 (`ut_metadata`).
+//! BEP 10 (extension protocol), BEP 9 (`ut_metadata`) and BEP 11 (`ut_pex`).
 //!
-//! Together these are what turn an infohash into a torrent. BEP 10 negotiates
+//! The first two are what turn an infohash into a torrent. BEP 10 negotiates
 //! which extensions both sides speak and, crucially, **which message id each
 //! side wants them on**. The mapping is per-peer and per-direction: if a peer
 //! says `{"ut_metadata": 3}`, we send it `ut_metadata` on id 3 while it sends
 //! us the same extension on whatever id we advertised. Hardcoding 1 or 2 here
 //! is the classic bug and works against roughly half the swarm.
+//!
+//! BEP 11 is how a swarm introduces its members to each other. It matters more
+//! than its size suggests: on a public swarm most of what a tracker names is
+//! unreachable, and the peer that will actually answer is frequently one only
+//! another peer knows about.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use serde_bencode::value::Value as Bencode;
 
@@ -128,6 +134,88 @@ impl ExtendedHandshake {
             yourip: bencode::dict_bytes(&root, b"yourip").map(<[u8]>::to_vec),
         })
     }
+}
+
+/// Most additions we will take from a single `ut_pex` message.
+///
+/// A well-behaved peer sends a handful every minute. A peer naming hundreds is
+/// either broken or trying to fill our queue with addresses of its choosing,
+/// and neither is worth the memory. The cap is generous enough that a busy
+/// swarm's genuine introductions all survive it.
+pub const MAX_PEX_ADDED: usize = 200;
+
+/// A `ut_pex` message (BEP 11): who else is in this swarm.
+///
+/// Only the additions are read. `dropped` is advice about peers that have gone
+/// away, and acting on it would mean hanging up on a connection that is working
+/// because a third party said we should. The peer queue retires dead addresses
+/// on its own evidence instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PexMessage {
+    pub added: Vec<SocketAddr>,
+}
+
+impl PexMessage {
+    /// Decode the additions from a `ut_pex` payload.
+    ///
+    /// Deliberately forgiving about a trailing partial entry, unlike the
+    /// tracker parsers: a tracker sending a malformed list is a bug worth
+    /// surfacing, whereas a peer doing it should cost us that one address
+    /// rather than every address in the message. The whole point of the
+    /// extension is to widen the search.
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let root = match serde_bencode::from_bytes::<Bencode>(payload) {
+            Ok(Bencode::Dict(dict)) => dict,
+            Ok(_) => return Err(Error::Peer("ut_pex payload is not a dict".into())),
+            Err(err) => return Err(Error::Peer(format!("ut_pex: {err}"))),
+        };
+
+        let mut added = Vec::new();
+        if let Some(bytes) = bencode::dict_bytes(&root, b"added") {
+            added.extend(compact_v4(bytes));
+        }
+        if let Some(bytes) = bencode::dict_bytes(&root, b"added6") {
+            added.extend(compact_v6(bytes));
+        }
+        added.retain(dialable);
+        added.truncate(MAX_PEX_ADDED);
+        Ok(Self { added })
+    }
+}
+
+/// Is this an address anyone could actually connect to?
+///
+/// Port zero and the unspecified address both turn up in real PEX messages,
+/// from peers that have not worked out their own listening port yet. Dialling
+/// them costs a connection slot and a timeout apiece.
+fn dialable(addr: &SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return false;
+    }
+    match addr.ip() {
+        IpAddr::V4(ip) => !ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast(),
+        IpAddr::V6(ip) => !ip.is_unspecified() && !ip.is_multicast(),
+    }
+}
+
+/// BEP 23 compact peers: four bytes of address, two of port, big endian.
+fn compact_v4(bytes: &[u8]) -> impl Iterator<Item = SocketAddr> + '_ {
+    bytes.chunks_exact(6).map(|entry| {
+        let ip = Ipv4Addr::new(entry[0], entry[1], entry[2], entry[3]);
+        SocketAddr::new(IpAddr::V4(ip), u16::from_be_bytes([entry[4], entry[5]]))
+    })
+}
+
+/// The same shape with a sixteen byte address.
+fn compact_v6(bytes: &[u8]) -> impl Iterator<Item = SocketAddr> + '_ {
+    bytes.chunks_exact(18).map(|entry| {
+        let mut octets = [0u8; 16];
+        octets.copy_from_slice(&entry[..16]);
+        SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::from(octets)),
+            u16::from_be_bytes([entry[16], entry[17]]),
+        )
+    })
 }
 
 /// A `ut_metadata` message (BEP 9).
@@ -361,6 +449,86 @@ mod tests {
                 .metadata_size,
             None
         );
+    }
+
+    /// Bencode a `ut_pex` message the way a real client would.
+    fn pex_payload(added: &[u8], added6: &[u8]) -> Vec<u8> {
+        let mut out = b"d5:added".to_vec();
+        out.extend(format!("{}:", added.len()).into_bytes());
+        out.extend_from_slice(added);
+        out.extend(b"6:added6");
+        out.extend(format!("{}:", added6.len()).into_bytes());
+        out.extend_from_slice(added6);
+        out.extend(b"e");
+        out
+    }
+
+    #[test]
+    fn pex_reads_compact_ipv4_additions() {
+        // 10.0.0.1:6881 and 192.168.1.2:51413.
+        let added = [10, 0, 0, 1, 0x1a, 0xe1, 192, 168, 1, 2, 0xc8, 0xd5];
+        let message = PexMessage::decode(&pex_payload(&added, &[])).unwrap();
+        assert_eq!(
+            message.added,
+            vec![
+                "10.0.0.1:6881".parse::<SocketAddr>().unwrap(),
+                "192.168.1.2:51413".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pex_reads_ipv6_additions_too() {
+        let mut added6 = [0u8; 18];
+        added6[15] = 1; // ::1
+        added6[16..].copy_from_slice(&6881u16.to_be_bytes());
+        let message = PexMessage::decode(&pex_payload(&[], &added6)).unwrap();
+        assert_eq!(message.added, vec!["[::1]:6881".parse().unwrap()]);
+    }
+
+    #[test]
+    fn pex_drops_addresses_nobody_could_dial() {
+        // Port zero, then the unspecified address, then one good one.
+        let added = [
+            10, 0, 0, 1, 0, 0, // port 0
+            0, 0, 0, 0, 0x1a, 0xe1, // 0.0.0.0
+            10, 0, 0, 2, 0x1a, 0xe1, // fine
+        ];
+        let message = PexMessage::decode(&pex_payload(&added, &[])).unwrap();
+        assert_eq!(message.added, vec!["10.0.0.2:6881".parse().unwrap()]);
+    }
+
+    #[test]
+    fn a_trailing_partial_entry_costs_one_address_not_all_of_them() {
+        // Strictness here would hand back nothing over one stray byte, which
+        // defeats the point of an extension whose job is finding more peers.
+        let added = [10, 0, 0, 1, 0x1a, 0xe1, 10, 0, 0];
+        let message = PexMessage::decode(&pex_payload(&added, &[])).unwrap();
+        assert_eq!(message.added, vec!["10.0.0.1:6881".parse().unwrap()]);
+    }
+
+    #[test]
+    fn pex_additions_are_capped() {
+        let mut added = Vec::new();
+        for index in 0..(MAX_PEX_ADDED as u32 + 50) {
+            added.extend_from_slice(&index.to_be_bytes());
+            added.extend_from_slice(&6881u16.to_be_bytes());
+        }
+        let message = PexMessage::decode(&pex_payload(&added, &[])).unwrap();
+        assert_eq!(message.added.len(), MAX_PEX_ADDED);
+    }
+
+    #[test]
+    fn a_pex_message_with_no_additions_is_not_an_error() {
+        // Peers send these routinely when only `dropped` has changed.
+        assert!(PexMessage::decode(b"de").unwrap().added.is_empty());
+        assert!(PexMessage::decode(b"d5:added0:e").unwrap().added.is_empty());
+    }
+
+    #[test]
+    fn malformed_pex_is_refused() {
+        assert!(PexMessage::decode(b"").is_err());
+        assert!(PexMessage::decode(b"i3e").is_err(), "not a dict");
     }
 
     #[test]
