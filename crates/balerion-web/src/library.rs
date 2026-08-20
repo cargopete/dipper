@@ -167,6 +167,9 @@ async fn adopt_one(state: &Arc<AppState>, root: &Path, hash: InfoHash) -> anyhow
     // Measured from now, which for an adoption is the moment the server
     // started rather than the moment anybody asked.
     let clock = Arc::new(Clock::started(std::time::Instant::now()));
+    let incomplete = !is_complete_on_disk(root, &meta).await;
+    let magnet_meta = meta.clone();
+
     let torrent = torrent::start(
         meta,
         Vec::new(),
@@ -177,6 +180,33 @@ async fn adopt_one(state: &Arc<AppState>, root: &Path, hash: InfoHash) -> anyhow
     )
     .await?;
     torrent.set_kept(true);
+
+    /* Go and find peers for it, in the background.
+     *
+     * Started with none above, and that was very nearly the whole of the
+     * feature's value thrown away: the re-announce loop's first real tick is
+     * five minutes after start, so an adopted half-finished torrent sat at zero
+     * peers and zero bytes for five minutes, and re-opening it from the page
+     * did nothing because it was already in the map and took the early return.
+     *
+     * In the background rather than inline because startup should not wait on
+     * a tracker, still less on one per kept torrent.
+     */
+    if incomplete {
+        let handle = torrent.handle.clone();
+        let config = state.config.clone();
+        tokio::spawn(async move {
+            let input = torrent::Input::Complete(Box::new(magnet_meta));
+            match torrent::resolve(&input, &config).await {
+                Ok((_, peers)) if !peers.is_empty() => {
+                    let fresh = handle.add_peers(peers.iter().copied());
+                    tracing::info!(fresh, "found peers for an adopted torrent");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::debug!(%err, "could not find peers for an adopted torrent"),
+            }
+        });
+    }
     // Kept means all of it, not merely what a playhead needs. One span covering
     // every piece, not a range to be collected.
     torrent
