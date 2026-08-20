@@ -48,7 +48,10 @@ if [ -z "$HOST" ]; then
   HOST="${HOST:-0.0.0.0}"
 fi
 
-mkdir -p "$UNIT_DIR" "$CONF_DIR"
+# The data directories too, and before the unit starts: systemd's
+# ReadWritePaths refuses to start a service whose paths do not exist, and says
+# so in terms that sound like the binary is missing.
+mkdir -p "$UNIT_DIR" "$CONF_DIR" "$HOME/.cache/balerion" "$HOME/.local/share/balerion"
 
 # A token that survives restarts, so the link on a phone keeps working. Kept in
 # a file of its own, readable only by you, so the unit can be committed and read

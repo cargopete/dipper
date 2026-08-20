@@ -47,7 +47,13 @@ RestrictAddressFamilies=AF_INET AF_INET6
 # Where torrents live, and the only place this may write. `%h/.cache/balerion`
 # is where it puts them by default on Linux; add any `-o` directory here too or
 # the download fails with a permission error that looks like a disk fault.
-ReadWritePaths=%h/.cache/balerion %h/.local/share/balerion
+#
+# The leading `-` matters: without it, a path that does not exist yet is not a
+# warning but a refusal to start, and systemd reports it as
+# `Failed at step NAMESPACE ... No such file or directory`, which reads as a
+# missing *binary* rather than a missing directory. The installer creates them,
+# and this makes a fresh machine forgiving anyway.
+ReadWritePaths=-%h/.cache/balerion -%h/.local/share/balerion
 
 [Install]
 WantedBy=default.target
