@@ -6,8 +6,13 @@ Documentation=https://github.com/cargopete/balerion
 # somebody notices.
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# Patient, and deliberately more so than the relay's. This one may be bound to
+# a Tailscale address, which does not exist until Tailscale is up, and
+# `network-online.target` makes no promise about that. Five attempts over
+# twenty-five seconds is enough to lose that race on a cold boot and then stay
+# dead until somebody notices; thirty over ten minutes is not.
+StartLimitIntervalSec=600
+StartLimitBurst=30
 
 [Service]
 Type=simple

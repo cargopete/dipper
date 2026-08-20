@@ -77,7 +77,12 @@ EOF
 install -m 644 "$HERE/balerion-serve.service" "$UNIT_DIR/balerion-serve.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now balerion-serve
+# A unit left in `failed` from an earlier attempt refuses to start again until
+# its counter is cleared, and reports "Start request repeated too quickly",
+# which reads as a crash loop rather than as stale state.
+systemctl --user reset-failed balerion-serve 2>/dev/null || true
+systemctl --user enable balerion-serve
+systemctl --user restart balerion-serve
 
 # So it keeps running when you are not logged in, which on an always-on machine
 # is the entire point. Needs no password if it has been granted before.

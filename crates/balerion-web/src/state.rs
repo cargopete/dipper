@@ -419,9 +419,25 @@ impl AppState {
     }
 
     /// The URL ffmpeg should read a file from: our own range endpoint.
+    ///
+    /// Carries the access token when there is one, and that is not belt and
+    /// braces. The guard lets loopback through untouched, which covers the
+    /// ordinary case where the server is bound to `0.0.0.0` and therefore
+    /// addresses itself as `127.0.0.1`. Bind it to one specific address —
+    /// a Tailscale address, say, which is the sensible thing to do on a machine
+    /// that is always on — and it addresses itself as *that*, which is not
+    /// loopback, and the transcoder is refused by its own server. Every file
+    /// needing conversion then fails with a 401 that looks like a broken
+    /// ffmpeg.
     pub fn stream_url(&self, hash: &str, file: usize) -> String {
         let base = self.self_base.lock().expect("self_base lock").clone();
-        format!("{base}/stream/{hash}/{file}")
+        match &self.config.access_token {
+            Some(token) => format!(
+                "{base}/stream/{hash}/{file}?{}={token}",
+                crate::access::TOKEN
+            ),
+            None => format!("{base}/stream/{hash}/{file}"),
+        }
     }
 
     /// Probe a file, remembering the answer. What is in a file never changes,
