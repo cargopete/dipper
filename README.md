@@ -256,6 +256,27 @@ back in the library, and abandoned ones are collected. Before that, ticking
 bytes sat on disk, and an unkept one that the sweeper could no longer see and
 therefore never removed.
 
+### Running it on the machine that is always on
+
+A laptop that is shut is a player nobody can reach, so the player belongs on
+whatever box stays up. `ops/install-player-linux.sh` sets that up as a systemd
+user service: it binds to your Tailscale address rather than to loopback,
+generates a token that survives restarts, enables lingering so it keeps running
+when you log out, and prints the one link each device needs to visit once.
+
+Binding to the Tailscale address rather than `0.0.0.0` is worth doing. On a
+laptop it is the difference between "my own devices can reach it" and "everyone
+on this network can try", and it means the token is a second line of defence
+rather than the only one.
+
+Two things to check on a machine that is not a Mac. It needs ffmpeg, or anything
+that is not already MP4 is offered as a download rather than played. And there is
+no VideoToolbox, so transcoding falls to Intel QuickSync or NVENC if its ffmpeg
+has them and to `libx264` if not. Whether that keeps up is a measurement rather
+than a guess: `/api/torrents/{hash}` reports `encoder.realtime`, which is seconds
+of video produced per second of encoding. Below 1.0 and no amount of bandwidth
+will help; a file that plays directly needs no encoder at all.
+
 Serving flags: `--port`, `--host`, `--token`, `-o <dir>`, `--low-bandwidth`.
 
 `--host` needs a word. Bound anywhere but loopback, the player is gated by a

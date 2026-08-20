@@ -1,0 +1,53 @@
+[Unit]
+Description=Balerion player
+Documentation=https://github.com/cargopete/balerion
+# Wants rather than Requires, for the same reason as the relay: a player that
+# starts before the network is up should keep trying rather than stay down until
+# somebody notices.
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Two things this unit does that the macOS agent did not, and both matter.
+#
+# It binds to the network rather than to loopback, because the whole reason for
+# running the player on the always-on machine is that a phone can reach it. And
+# it therefore carries a token, which is what makes that reasonable: every
+# request that did not come from this machine has to present it, so the endpoint
+# that downloads whatever magnet it is handed is not simply open.
+#
+# Bind to the Tailscale address rather than 0.0.0.0 if you can. On a laptop that
+# is the difference between "reachable by my own devices" and "reachable by
+# everyone in the coffee shop", and the token then stops being the only thing in
+# the way. Find it with `tailscale ip -4`.
+#
+# The token lives in an environment file rather than here, so that this unit can
+# be read, copied and committed without carrying a credential.
+EnvironmentFile=%h/.config/balerion/serve.env
+ExecStart=%h/.cargo/bin/balerion serve \
+    --host ${BALERION_HOST} \
+    --token ${BALERION_TOKEN} \
+    --port 8080 \
+    --cast-port 8081
+Restart=always
+RestartSec=5
+
+# Unlike the relay, this one holds a torrent session and writes to disk, so it
+# needs rather more than "nothing". Said explicitly all the same: what it may
+# write is its own state and its downloads, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+# Where torrents live, and the only place this may write. `%h/.cache/balerion`
+# is where it puts them by default on Linux; add any `-o` directory here too or
+# the download fails with a permission error that looks like a disk fault.
+ReadWritePaths=%h/.cache/balerion %h/.local/share/balerion
+
+[Install]
+WantedBy=default.target
