@@ -53,9 +53,18 @@ export type FindResults = {
   duplicates: number;
 };
 
+/** How long to wait when merely asking what a relay can reach.
+ *
+ * Short, and the reason is a bruise. This probe was first written with the
+ * default twenty seconds and put on the critical path of the page's first
+ * load; with the relay's machine asleep, every visit sat waiting for a dead
+ * tunnel before the menu appeared. A relay that cannot list its own indexes in
+ * three seconds cannot serve a search either, so waiting longer buys nothing. */
+const SOURCES_TIMEOUT_MS = 3_000;
+
 /** Which indexes this deployment's relay can reach. */
 export async function sources(config: RelayConfig): Promise<Source[]> {
-  const answer = await relayFetch("/sources", new URLSearchParams(), config);
+  const answer = await relayFetch("/sources", new URLSearchParams(), config, SOURCES_TIMEOUT_MS);
   return answer as Source[];
 }
 

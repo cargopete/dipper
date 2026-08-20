@@ -237,6 +237,26 @@ export default function Page() {
       .catch(() => setError("Could not load the indexes. Nothing will search until that does."));
   }, []);
 
+  /* The indexes that live on the relay's machine, asked for separately and
+     appended when they arrive.
+     
+     Separate because this one can be slow or never answer: it depends on a
+     laptop being awake, and the menu must not. Silent on failure for the same
+     reason — a machine being asleep is not an error worth putting in front of
+     somebody, it just means there is less to choose from. */
+  useEffect(() => {
+    fetch("/api/search?sources")
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error())))
+      .then((body: { indexes: IndexInfo[] }) => {
+        if (!body.indexes?.length) return;
+        setIndexes((held) => [
+          ...held,
+          ...body.indexes.filter((extra) => !held.some((one) => one.key === extra.key)),
+        ]);
+      })
+      .catch(() => {});
+  }, []);
+
   /* The opening shelf, once. A hand-picked list rather than a chart, because
      TVmaze has no popularity endpoint and inventing a ranking would be a lie
      told in a nice grid. */

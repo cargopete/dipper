@@ -27,14 +27,14 @@ function localBalerion(): string | null {
   return url ? url.replace(/\/+$/, "") : null;
 }
 
-async function catalogue() {
-  /* Whatever else this deployment's relay can reach. Torznab indexers live on
-   * that machine and are named by whoever set them up, so they can only arrive
-   * at runtime; asking for them is free and failing to reach them simply makes
-   * the menu shorter. */
-  const extra = await reachableSources();
-  const indexers = extra.filter((source) => source.key.startsWith("torznab:"));
-
+/* The menu, and nothing that has to leave this datacentre to build it.
+ *
+ * Deliberately synchronous. An earlier version asked the relay here for the
+ * indexes it can reach, which put the first paint of every page load behind
+ * somebody's laptop being awake: with the relay down, the menu waited for a
+ * dead tunnel to time out before appearing. Anything that needs the relay is
+ * `?sources` below, which the page asks for afterwards and can do without. */
+function catalogue() {
   return NextResponse.json({
     relayConfigured: relayConfig() !== null,
     local: localBalerion(),
@@ -71,6 +71,21 @@ async function catalogue() {
         })),
         note: null,
       },
+    ],
+  });
+}
+
+/* The indexes that only exist on the relay's machine, asked for separately.
+ *
+ * Off the critical path on purpose: the page draws its menu from `?catalogue`
+ * immediately and appends these when and if they arrive. A machine that is
+ * asleep should make the menu shorter, never make the page slower. */
+async function extraSources() {
+  const extra = await reachableSources();
+  const indexers = extra.filter((source) => source.key.startsWith("torznab:"));
+
+  return NextResponse.json({
+    indexes: [
       ...indexers.map((source) => ({
         key: source.key,
         label: source.label,
@@ -107,6 +122,7 @@ async function catalogue() {
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   if (params.get("catalogue") !== null) return catalogue();
+  if (params.get("sources") !== null) return extraSources();
 
   const terms = (params.get("q") ?? "").trim();
   const asked = params.get("index") ?? "ia";
