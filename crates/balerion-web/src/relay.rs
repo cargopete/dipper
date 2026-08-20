@@ -49,7 +49,12 @@ pub struct RelayConfig {
 }
 
 struct RelayState {
-    tpb: balerion_tpb::TpbClient,
+    /// Every index this machine can reach, which is the same set the player
+    /// carries. Deliberately not the player's whole `AppState`: this process
+    /// cannot start a download, cannot read a file and cannot see a torrent
+    /// session, and that has to remain true of what it *holds* rather than only
+    /// of what it routes.
+    sources: Arc<crate::find::Sources>,
     token: Option<String>,
     vercel: Option<Arc<OidcVerifier>>,
 }
@@ -142,10 +147,41 @@ async fn search(
     if !authorised(&headers, &state).await {
         return refused();
     }
-    match tpb::run_search(&state.tpb, &params).await {
+    match tpb::run_search(&state.sources.tpb, &params).await {
         Ok(results) => Json(results).into_response(),
         Err(err) => err.into_response(),
     }
+}
+
+/// The search seam, for a front end that would otherwise have to port it.
+///
+/// This is the point of the whole module now. The hosted site used to carry its
+/// own TypeScript translation of the archive.org rules and the apibay ones, so
+/// there were two implementations of "what a search means" and they agreed only
+/// as long as somebody remembered to edit both. Serving the seam from here
+/// means there is one, in Rust, tested, and the site asks it.
+async fn find(
+    State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
+    Query(params): Query<crate::find::FindParams>,
+) -> Response {
+    if !authorised(&headers, &state).await {
+        return refused();
+    }
+    match crate::find::run_find(&state.sources, &params).await {
+        Ok(results) => Json(results).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+/// Which indexes this relay can actually reach, so a page can draw its menu
+/// without guessing. Whatever Torznab indexers are configured show up here and
+/// nowhere else, since they live on this machine.
+async fn find_sources(State(state): State<Arc<RelayState>>, headers: HeaderMap) -> Response {
+    if !authorised(&headers, &state).await {
+        return refused();
+    }
+    Json(crate::find::sources(&state.sources)).into_response()
 }
 
 async fn categories(State(state): State<Arc<RelayState>>, headers: HeaderMap) -> Response {
@@ -160,6 +196,8 @@ fn router(state: Arc<RelayState>) -> Router {
         .route("/health", get(health))
         .route("/search", get(search))
         .route("/categories", get(categories))
+        .route("/find", get(find))
+        .route("/sources", get(find_sources))
         .with_state(state)
 }
 
@@ -186,11 +224,14 @@ pub async fn serve(config: RelayConfig) -> Result<()> {
         }
     }
 
-    let client = balerion_tpb::TpbClient::with_config(balerion_tpb::ClientConfig {
-        timeout: UPSTREAM_TIMEOUT,
-        ..Default::default()
-    })
-    .context("building the apibay client")?;
+    let sources = Arc::new(crate::find::Sources {
+        tpb: balerion_tpb::TpbClient::with_config(balerion_tpb::ClientConfig {
+            timeout: UPSTREAM_TIMEOUT,
+            ..Default::default()
+        })
+        .context("building the apibay client")?,
+        ..crate::find::Sources::from_env()
+    });
 
     let vercel = match config.vercel {
         Some(identity) => {
@@ -207,7 +248,7 @@ pub async fn serve(config: RelayConfig) -> Result<()> {
     }
 
     let state = Arc::new(RelayState {
-        tpb: client,
+        sources,
         token: config.token,
         vercel,
     });
@@ -287,7 +328,7 @@ mod tests {
 
     fn state(token: Option<&str>) -> RelayState {
         RelayState {
-            tpb: balerion_tpb::TpbClient::new().unwrap(),
+            sources: Arc::new(crate::find::Sources::from_env()),
             token: token.map(str::to_string),
             vercel: None,
         }

@@ -420,6 +420,24 @@ Cloudflare bot challenge to datacentre addresses, so those queries go through
 search and nothing else, and authorises callers by verifying Vercel's own OIDC
 tokens, so there is no shared secret. See [site/README.md](site/README.md).
 
+**The relay serves the search seam**, which is why the site no longer carries a
+second implementation of the rules. It used to have its own TypeScript
+translation of the archive.org filters and the apibay ones, so there were two
+answers to "what does a search mean" and they agreed only for as long as
+somebody remembered to edit both. Now `/find` and `/sources` come off the relay,
+in Rust, tested, and the site draws them: whatever Torznab indexers you have
+configured turn up in its menu, along with an *Every index* entry that asks all
+of them at once and folds duplicate releases into one row.
+
+The relay holds the search clients and nothing more. It was tempting to hand it
+the player's whole state to reach the seam and rely on the routing table to keep
+the rest unreachable; a struct with three HTTP clients in it cannot start a
+download whatever anybody routes, and that seemed the better guarantee.
+
+archive.org stays a direct call, so the hosted search still works when the
+machine at home is asleep. It is the half whose rights are actually clear, and
+it should not depend on anybody's laptop being open.
+
 ## Layout
 
 | crate | what it does |

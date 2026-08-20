@@ -29,6 +29,36 @@ use serde::{Deserialize, Serialize};
 use crate::routes::ApiError;
 use crate::state::AppState;
 
+/// The clients a search needs, and nothing else.
+///
+/// Separated out so the relay can have one. The relay is deliberately minimal:
+/// it "cannot start a download, cannot read a file and cannot see the torrent
+/// session", and handing it the player's whole [`AppState`] to reach a search
+/// would have given it all three capabilities and relied on the routing table
+/// to keep them unreachable. A struct with three HTTP clients in it cannot
+/// download anything whatever anybody routes.
+#[derive(Debug)]
+pub struct Sources {
+    /// Held rather than built per request so its rate limiting actually
+    /// applies: a client rebuilt each time paces itself against nothing.
+    pub ia: balerion_ia::IaClient,
+    pub tpb: balerion_tpb::TpbClient,
+    /// Whatever Torznab indexers were configured: Prowlarr, Jackett, Zilean,
+    /// bitmagnet, or anything else that speaks the protocol. `None` is the
+    /// ordinary state.
+    pub torznab: Option<balerion_torznab::TorznabClient>,
+}
+
+impl Sources {
+    pub fn from_env() -> Self {
+        Self {
+            ia: balerion_ia::IaClient::new().expect("the HTTP client failed to build"),
+            tpb: balerion_tpb::TpbClient::new().expect("the HTTP client failed to build"),
+            torznab: balerion_torznab::TorznabClient::from_env(),
+        }
+    }
+}
+
 /// One index that can be asked a question.
 #[derive(Debug, Clone, Serialize)]
 pub struct Source {
@@ -43,7 +73,7 @@ pub struct Source {
 }
 
 /// Everything this balerion can ask.
-pub fn sources(state: &AppState) -> Vec<Source> {
+pub fn sources(state: &Sources) -> Vec<Source> {
     let mut sources = vec![Source {
         key: "ia".into(),
         label: "Internet Archive".into(),
@@ -117,7 +147,7 @@ pub struct Results {
 }
 
 /// The sources a request asked for, or the defaults.
-fn wanted(state: &AppState, params: &FindParams) -> Vec<Source> {
+fn wanted(state: &Sources, params: &FindParams) -> Vec<Source> {
     let available = sources(state);
     let Some(asked) = params
         .sources
@@ -136,12 +166,22 @@ fn wanted(state: &AppState, params: &FindParams) -> Vec<Source> {
         .collect()
 }
 
+/// The player's route.
 pub async fn handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FindParams>,
 ) -> Result<Json<Results>, ApiError> {
+    Ok(Json(run_find(&state.sources, &params).await?))
+}
+
+/// The search itself, shared by the player and the relay.
+///
+/// Extracted for the same reason [`crate::tpb::shortlist`] was: the two callers
+/// must not be able to disagree about what a search means, and a copy is a
+/// thing that agrees right up until somebody edits one of them.
+pub async fn run_find(state: &Arc<Sources>, params: &FindParams) -> Result<Results, ApiError> {
     let limit = params.limit.unwrap_or(30).clamp(1, 100);
-    let chosen = wanted(&state, &params);
+    let chosen = wanted(state, params);
     if chosen.is_empty() {
         return Err(ApiError::bad_request("no such source"));
     }
@@ -149,7 +189,7 @@ pub async fn handler(
     // Asked at once. One index being slow must not hold up the others, which
     // is the whole reason a fan-out is worth having.
     let asks = chosen.iter().map(|source| {
-        let state = Arc::clone(&state);
+        let state = Arc::clone(state);
         let terms = params.q.clone();
         let source = source.clone();
         async move {
@@ -186,12 +226,12 @@ pub async fn handler(
     hits.sort_by_key(|hit| std::cmp::Reverse(crate::release::rank(&hit.title, hit.seeders)));
     hits.truncate(limit as usize);
 
-    Ok(Json(Results {
+    Ok(Results {
         hits,
         answered,
         failed,
         duplicates,
-    }))
+    })
 }
 
 /// Fold results that are the same torrent into one.
@@ -235,7 +275,7 @@ pub fn merge(hits: Vec<Found>) -> Vec<Found> {
 
 /// Ask one source.
 async fn ask(
-    state: &Arc<AppState>,
+    state: &Arc<Sources>,
     source: &Source,
     terms: &str,
     limit: u32,
@@ -250,7 +290,7 @@ async fn ask(
     }
 }
 
-async fn ask_archive(state: &Arc<AppState>, terms: &str, limit: u32) -> anyhow::Result<Vec<Found>> {
+async fn ask_archive(state: &Arc<Sources>, terms: &str, limit: u32) -> anyhow::Result<Vec<Found>> {
     let query = AdvancedQuery::new(crate::search::build_query(terms, None))
         .fields([
             "identifier",
@@ -284,7 +324,7 @@ async fn ask_archive(state: &Arc<AppState>, terms: &str, limit: u32) -> anyhow::
         .collect())
 }
 
-async fn ask_apibay(state: &Arc<AppState>, terms: &str, limit: u32) -> anyhow::Result<Vec<Found>> {
+async fn ask_apibay(state: &Arc<Sources>, terms: &str, limit: u32) -> anyhow::Result<Vec<Found>> {
     if terms.trim().is_empty() {
         // apibay has no browse: an empty query gets its no-results sentinel,
         // which would surface as "nothing matches that".
@@ -312,7 +352,7 @@ async fn ask_apibay(state: &Arc<AppState>, terms: &str, limit: u32) -> anyhow::R
 }
 
 async fn ask_torznab(
-    state: &Arc<AppState>,
+    state: &Arc<Sources>,
     name: &str,
     terms: &str,
     limit: u32,
@@ -354,7 +394,7 @@ async fn ask_torznab(
 
 /// The sources this balerion can ask, for the page's menu.
 pub async fn list(State(state): State<Arc<AppState>>) -> Json<Vec<Source>> {
-    Json(sources(&state))
+    Json(sources(&state.sources))
 }
 
 #[cfg(test)]

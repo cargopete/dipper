@@ -60,7 +60,9 @@ type Row = {
   title: string;
   meta: (string | null)[];
   sizeBytes: number | null;
-  swarm: { seeders: number; leechers: number } | null;
+  /** Leechers are nullable because not every index reports them, and
+   * printing a zero for one that does not makes a healthy swarm look dead. */
+  swarm: { seeders: number; leechers: number | null } | null;
   /** What gets copied: a magnet, or an archive.org identifier. */
   copy: string | null;
   /** Where to read more about it, when the index offers such a place. */
@@ -106,8 +108,33 @@ function bytes(n: number | null): string {
 /** Under about ten seeders a stream will not keep ahead of the playhead. */
 const THIN_SWARM = 10;
 
-function toRows(index: "ia" | "tpb", data: Record<string, unknown>): Row[] {
+function toRows(index: string, data: Record<string, unknown>): Row[] {
   const hits = (data.hits ?? []) as Record<string, never>[];
+
+  /* Anything that came through the relay's seam. One shape for every index
+   * behind it, which is the point: the rules about what a search means live in
+   * Rust and this only has to draw the answer. */
+  if (index !== "ia" && index !== "tpb") {
+    return hits.map((hit, at) => ({
+      key: String(hit.info_hash ?? `${index}-${at}`),
+      title: String(hit.title),
+      meta: [
+        // Which index found it, first: with several configured that is most of
+        // what makes a mixed list legible.
+        (hit.sources as unknown as string[]).join(" + "),
+        hit.detail ? String(hit.detail) : null,
+      ],
+      sizeBytes: hit.size ? Number(hit.size) : null,
+      /* Seeders only. `/find` reports the one figure every index agrees to
+       * give, and inventing a zero for leechers would make a healthy swarm
+       * look dead. */
+      swarm:
+        hit.seeders === undefined ? null : { seeders: Number(hit.seeders), leechers: null },
+      copy: String(hit.open),
+      href: null,
+    }));
+  }
+
   if (index === "tpb") {
     return hits.map((hit) => ({
       key: String(hit.id),
@@ -147,7 +174,7 @@ export default function Page() {
   /* apibay first: it is what this is actually used for. The Archive is the
      safer index and the second choice, which is a different claim from being the
      default one. */
-  const [index, setIndex] = useState<"ia" | "tpb">("tpb");
+  const [index, setIndex] = useState<string>("tpb");
   const [filter, setFilter] = useState("video");
   const [terms, setTerms] = useState("");
   const [thin, setThin] = useState(false);
@@ -298,11 +325,14 @@ export default function Page() {
      calls it in the same tick as setting them and state has not caught up. That
      was a search for the empty string the first time round. */
   const runWith = useCallback(
-    async (searchFor: string, forIndex: "ia" | "tpb" = index) => {
+    async (searchFor: string, forIndex: string = index) => {
       const entry = indexes.find((i) => i.key === forIndex);
       if (!entry) return;
       // The Archive browses on an empty query; apibay has no browse.
-      if (!searchFor.trim() && forIndex === "tpb") return;
+      // Only the Archive has a browse: everything else answers an empty
+      // query with a sentinel that reads as "nothing matched", which is not
+      // what happened.
+      if (!searchFor.trim() && forIndex !== "ia") return;
       const terms = searchFor;
       const index = forIndex;
 
@@ -322,14 +352,27 @@ export default function Page() {
 
         const produced = toRows(index, body);
         setRows(produced);
+
+        /* The seam reports no grand total, because there is no such number
+         * once several indexes have been asked and their duplicates folded
+         * together. It reports what it did instead, which is more use: how
+         * many rows were the same release twice, and which index failed to
+         * answer. A short list is otherwise indistinguishable from a thorough
+         * search that found little. */
         const shown = produced.length
-          ? `showing ${produced.length} of ${body.total}`
+          ? body.total === undefined
+            ? `showing ${produced.length}`
+            : `showing ${produced.length} of ${body.total}`
           : "nothing to show";
         const hidden = [
           body.oversize ? `${body.oversize} too large` : null,
           body.unseeded ? `${body.unseeded} unseeded` : null,
+          body.duplicates ? `${body.duplicates} the same release twice` : null,
+          Array.isArray(body.failed) && body.failed.length
+            ? `${(body.failed as string[]).join(", ")} did not answer`
+            : null,
         ].filter(Boolean);
-        setCount(hidden.length ? `${shown}, ${hidden.join(" and ")} hidden` : shown);
+        setCount(hidden.length ? `${shown}, ${hidden.join(" and ")}` : shown);
       } catch (err) {
         setRows(null);
         setCount("");
@@ -351,7 +394,7 @@ export default function Page() {
 
   /* Changing the index invalidates what is on screen: those results belong to
    * the other one, and leaving them under a new menu invites a wrong click. */
-  function switchIndex(next: "ia" | "tpb") {
+  function switchIndex(next: string) {
     const entry = indexes.find((i) => i.key === next);
     setIndex(next);
     setFilter(entry?.options[0]?.key ?? "");
@@ -371,7 +414,16 @@ export default function Page() {
     }
   }
 
-  const copyLabel = index === "tpb" ? "Copy magnet" : "Copy identifier";
+  /* What the button actually puts on the clipboard, read off the row rather
+   * than off the index. The Archive needs no magnet: balerion turns an
+   * identifier into a torrent over HTTPS, which is what makes those items work
+   * at all. Every other index hands over a magnet.
+   *
+   * Per row because "every index" mixes them in one list, and labelling a
+   * magnet "identifier" is a small lie that makes somebody paste the wrong
+   * thing somewhere else. */
+  const copyLabel = (row: Row) =>
+    row.copy?.startsWith("magnet:") ? "Copy magnet" : "Copy identifier";
 
   return (
     <>
@@ -576,7 +628,10 @@ export default function Page() {
                   ))}
                 </select>
               </div>
-              <div className="field">
+              {/* Hidden for an index with no subsets. A Torznab indexer has
+                  categories, but which ones depends on what is behind it, and
+                  an empty menu is worse than none. */}
+              <div className="field" hidden={!chosenIndex?.filterLabel}>
                 <label htmlFor="filter">{chosenIndex?.filterLabel ?? "Collection"}</label>
                 <select
                   id="filter"
@@ -668,7 +723,9 @@ export default function Page() {
                       className="result-swarm"
                       title={
                         row.swarm
-                          ? `${row.swarm.seeders} seeding, ${row.swarm.leechers} leeching`
+                          ? row.swarm.leechers === null
+                            ? `${row.swarm.seeders} seeding; this index does not report leechers`
+                            : `${row.swarm.seeders} seeding, ${row.swarm.leechers} leeching`
                           : undefined
                       }
                     >
@@ -681,7 +738,7 @@ export default function Page() {
                           >
                             {row.swarm.seeders}
                           </span>
-                          {` / ${row.swarm.leechers}`}
+                          {row.swarm.leechers === null ? null : ` / ${row.swarm.leechers}`}
                         </>
                       ) : null}
                     </span>
@@ -710,7 +767,7 @@ export default function Page() {
                         }
                         onClick={() => copy(row)}
                       >
-                        {copied === row.key ? "Copied" : copyLabel}
+                        {copied === row.key ? "Copied" : copyLabel(row)}
                       </button>
                     </span>
                   </li>

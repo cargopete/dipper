@@ -112,9 +112,31 @@ disqualified rather than merely ranked low, and a logarithmic swarm term so a
 popular bad release cannot beat a good one with a healthy swarm. Next-episode
 autoplay is in, cancelled by any sign of a viewer still being in the room.
 
+**6.1 is now finished on both sides.** The relay serves `/find` and `/sources`,
+so the hosted site has stopped carrying its own TypeScript translation of the
+archive.org and apibay rules: there is one answer to "what does a search mean",
+it is in Rust, and the site asks it. Torznab indexers appear in the hosted
+menu, along with an *Every index* entry.
+
+The relay was given a `Sources` struct rather than the player's `AppState`. It
+was tempting to hand it the whole thing and rely on the routing table to keep
+the download machinery unreachable, but the relay's guarantee is about what it
+*holds* rather than what it routes: three HTTP clients cannot start a download
+whatever anybody wires up later.
+
+archive.org stays a direct call from Vercel, deliberately. It answers a
+datacentre address perfectly happily, and the one index whose rights are
+actually clear should not stop working because somebody's laptop is shut.
+
+Three faults found by opening the built page rather than by reading it: the
+results count read "showing 24 of undefined", because the seam reports no grand
+total and there is no such number once duplicates have been folded; the
+collection menu was drawn empty for an index that has no collections; and every
+row said "Copy identifier" including the ones where the button copies a magnet,
+which in an *Every index* search is most of them.
+
 Still open in phase 5: the artwork decision (6.3), which needs a TMDB key and
-therefore needs Chief; and unifying the TypeScript site's own ports with the
-seam, which still duplicates the archive.org and apibay rules.
+therefore needs Chief.
 
 **Phase 8, the stability work, is largely done.** The site and the player's own
 JavaScript are both in CI (8.1). The long-lived tasks are supervised, so a panic

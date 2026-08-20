@@ -164,7 +164,7 @@ pub async fn handler(
         .sort(["downloads desc"])
         .rows(limit);
 
-    let page = advanced::page(&state.ia, &query, 1)
+    let page = advanced::page(&state.sources.ia, &query, 1)
         .await
         .map_err(|err| ApiError::bad_request(format!("archive.org search failed: {err}")))?;
 

@@ -171,7 +171,7 @@ pub async fn handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Results>, ApiError> {
-    Ok(Json(run_search(&state.tpb, &params).await?))
+    Ok(Json(run_search(&state.sources.tpb, &params).await?))
 }
 
 #[derive(Debug, Serialize)]

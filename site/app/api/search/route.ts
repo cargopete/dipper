@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import * as archive from "../../../lib/archive";
 import { CATEGORIES, fromRelay, thinCap, type RelayResults } from "../../../lib/apibay";
+import { find, reachableSources } from "../../../lib/find";
 import { RelayError, relayConfig, relayFetch } from "../../../lib/relay";
 
 /* Two indexes, reached two different ways, and the difference is not a design
@@ -26,7 +27,14 @@ function localBalerion(): string | null {
   return url ? url.replace(/\/+$/, "") : null;
 }
 
-function catalogue() {
+async function catalogue() {
+  /* Whatever else this deployment's relay can reach. Torznab indexers live on
+   * that machine and are named by whoever set them up, so they can only arrive
+   * at runtime; asking for them is free and failing to reach them simply makes
+   * the menu shorter. */
+  const extra = await reachableSources();
+  const indexers = extra.filter((source) => source.key.startsWith("torznab:"));
+
   return NextResponse.json({
     relayConfigured: relayConfig() !== null,
     local: localBalerion(),
@@ -63,6 +71,35 @@ function catalogue() {
         })),
         note: null,
       },
+      ...indexers.map((source) => ({
+        key: source.key,
+        label: source.label,
+        reachable: true,
+        // A Torznab indexer has categories, but which ones depends entirely on
+        // what is behind it, and offering the wrong list is worse than none.
+        filterLabel: null,
+        options: [],
+        note: source.note,
+      })),
+      /* Every index at once, which is the thing the seam exists for: the
+       * answers are merged, results that are the same torrent are folded into
+       * one row on their infohash, and the ordering is by what a release is
+       * rather than by how popular it is. Only offered when there is more than
+       * one thing to ask. */
+      ...(extra.length > 1
+        ? [
+            {
+              key: "all",
+              label: "Every index",
+              reachable: true,
+              filterLabel: null,
+              options: [],
+              note:
+                "Asks all of them at once and folds results that are the same torrent into " +
+                "one row. The cautions above apply to whichever index a row came from.",
+            },
+          ]
+        : []),
     ],
   });
 }
@@ -72,8 +109,41 @@ export async function GET(request: Request) {
   if (params.get("catalogue") !== null) return catalogue();
 
   const terms = (params.get("q") ?? "").trim();
-  const index = params.get("index") === "tpb" ? "tpb" : "ia";
+  const asked = params.get("index") ?? "ia";
   const limit = Math.min(Math.max(Number(params.get("limit")) || 24, 1), 100);
+
+  /* Anything that is not one of the two written out below goes through the
+   * relay's seam: a named Torznab indexer, or all of them at once. */
+  if (asked.startsWith("torznab:") || asked === "all") {
+    const relay = relayConfig();
+    if (!relay) {
+      return NextResponse.json(
+        { error: "that index lives on your machine, and the relay is not configured." },
+        { status: 503 },
+      );
+    }
+    if (!terms) {
+      return NextResponse.json({ error: "type something to search for" }, { status: 400 });
+    }
+
+    const keys =
+      asked === "all"
+        ? (await reachableSources()).map((source) => source.key)
+        : [asked];
+    try {
+      const results = await find(relay, terms, keys, limit);
+      return NextResponse.json({ index: asked, ...results });
+    } catch (err) {
+      if (err instanceof RelayError) {
+        const status = err.kind === "unreachable" || err.kind === "unconfigured" ? 503 : 502;
+        return NextResponse.json({ error: err.message, kind: err.kind }, { status });
+      }
+      const because = err instanceof Error ? err.message : "unknown";
+      return NextResponse.json({ error: `search failed: ${because}` }, { status: 502 });
+    }
+  }
+
+  const index = asked === "tpb" ? "tpb" : "ia";
 
   if (index === "ia") {
     /* An empty query is a browse of the collection here, which is genuinely

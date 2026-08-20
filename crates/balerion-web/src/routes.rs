@@ -156,7 +156,7 @@ pub async fn resolve(
     // The clock starts when the viewer asks, not when the download does: the
     // wait they actually experience includes everything before the first byte.
     let clock = Arc::new(crate::state::Clock::started(std::time::Instant::now()));
-    let input = torrent::parse_input(&request.magnet, &state.ia).await?;
+    let input = torrent::parse_input(&request.magnet, &state.sources.ia).await?;
 
     // Already going? Hand back what we have rather than starting a second copy
     // of the same download on top of the first one's files.

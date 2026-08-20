@@ -3,3 +3,8 @@ node_modules
 .env*.local
 .vercel
 *.tsbuildinfo
+
+# Written by `next build`: instructions for AI tooling about this Next.js
+# version. Generated, so not tracked; it reappears on every build.
+CLAUDE.md
+AGENTS.md

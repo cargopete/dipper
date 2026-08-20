@@ -318,18 +318,10 @@ fn max_transcodes() -> usize {
 
 pub struct AppState {
     pub config: ServeConfig,
-    /// Used only to turn an archive.org identifier into a torrent. Held here
-    /// rather than built per request so its rate limiting actually applies.
-    pub ia: balerion_ia::IaClient,
-    /// Used only for searching. Held here for the same reason as `ia`: a client
-    /// rebuilt per request paces itself against nothing.
-    pub tpb: balerion_tpb::TpbClient,
-    /// Whatever Torznab indexers were configured: Prowlarr, Jackett, Zilean,
-    /// bitmagnet, or anything else that speaks the protocol.
-    ///
-    /// `None` is the ordinary state. One client covers however many indexers
-    /// are named, because they differ only in their base URL.
-    pub torznab: Option<balerion_torznab::TorznabClient>,
+    /// The clients every search goes through, and the same set the relay
+    /// carries. One shape rather than three fields, so the player and the relay
+    /// cannot drift apart about what a search can reach.
+    pub sources: Arc<crate::find::Sources>,
     /// ffmpeg, if this machine has it. `None` disables transcoding and the
     /// player falls back to offering downloads.
     pub tools: Option<crate::ffmpeg::Tools>,
@@ -406,9 +398,7 @@ impl AppState {
     pub fn new(config: ServeConfig) -> Self {
         Self {
             config,
-            ia: balerion_ia::IaClient::new().expect("the HTTP client failed to build"),
-            tpb: balerion_tpb::TpbClient::new().expect("the HTTP client failed to build"),
-            torznab: balerion_torznab::TorznabClient::from_env(),
+            sources: Arc::new(crate::find::Sources::from_env()),
             tools: None,
             osdb: balerion_osdb::OsdbClient::from_env(),
             whisper: None,
