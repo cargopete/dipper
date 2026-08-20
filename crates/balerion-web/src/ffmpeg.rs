@@ -25,12 +25,42 @@ pub const SEGMENT_SECONDS: f64 = 6.0;
 const SEGMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Decoding a whole film's audio means fetching the whole film, so this is
+/// generous. It is bounded at all only so a stalled swarm cannot leave an
+/// ffmpeg running for the life of the process.
+const AUDIO_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// What the page is told a transcode will produce: H.264 High, at a level
 /// ceiling rather than an exact level. See the note in [`plan`].
 pub const TRANSCODE_CODEC: &str = "avc1.640033";
 
 /// Always available, and tolerant of inputs hardware encoders refuse.
 const FALLBACK_ENCODER: &str = "libx264";
+
+/// Hardware encoders worth using, in the order they are worth using.
+///
+/// All three take the same arguments as libx264 for what balerion asks of them,
+/// which is why they are a list and not three code paths. VAAPI is deliberately
+/// absent: it needs a render device named on the command line and a hwupload
+/// filter chain, so it is not a drop-in name, and it fails in ways that would
+/// have to be tested on hardware this was not written on.
+const HARDWARE_ENCODERS: &[&str] = &[
+    // macOS. Costs almost nothing and leaves the CPU free for the torrent.
+    "h264_videotoolbox",
+    // NVIDIA.
+    "h264_nvenc",
+    // Intel QuickSync.
+    "h264_qsv",
+];
+
+/// Choose an encoder from what this ffmpeg says it has.
+fn pick_encoder(listing: &str) -> &'static str {
+    HARDWARE_ENCODERS
+        .iter()
+        .find(|name| listing.contains(*name))
+        .copied()
+        .unwrap_or(FALLBACK_ENCODER)
+}
 
 /// ffmpeg, if this machine has it.
 #[derive(Debug, Clone)]
@@ -50,19 +80,12 @@ impl Tools {
         let ffmpeg = runnable("ffmpeg").await?;
         let ffprobe = runnable("ffprobe").await?;
 
-        // VideoToolbox costs almost nothing and leaves the CPU free for the
-        // torrent. libx264 everywhere else.
         let listing = Command::new(&ffmpeg)
             .args(["-hide_banner", "-encoders"])
             .output()
             .await
             .ok()?;
-        let video_encoder =
-            if String::from_utf8_lossy(&listing.stdout).contains("h264_videotoolbox") {
-                "h264_videotoolbox"
-            } else {
-                "libx264"
-            };
+        let video_encoder = pick_encoder(&String::from_utf8_lossy(&listing.stdout));
 
         tracing::info!(encoder = video_encoder, "transcoding is available");
         Some(Self {
@@ -90,9 +113,35 @@ async fn runnable(tool: &str) -> Option<PathBuf> {
 #[derive(Debug, Clone, Default)]
 pub struct Probe {
     pub duration: f64,
+    /// Bits per second across the whole file, when ffprobe says.
+    pub bit_rate: Option<u64>,
     pub video: Option<VideoStream>,
+    /// The chosen audio track, which is the first one unless a caller says
+    /// otherwise. Kept for every existing reader of `probe.audio`.
     pub audio: Option<AudioStream>,
+    /// Every audio track in the file.
+    ///
+    /// A film with a commentary or a second language has more than one, and
+    /// taking whichever the muxer happened to put first is how a viewer ends up
+    /// listening to a director talk over the picture with no way to stop it.
+    pub audio_tracks: Vec<AudioStream>,
     pub subtitles: Vec<SubtitleStream>,
+}
+
+impl Probe {
+    /// The same probe, as though `track` were the only audio stream.
+    ///
+    /// Used to build a plan for a chosen track without threading the choice
+    /// through every function that already reads `probe.audio`.
+    pub fn with_audio(&self, track: usize) -> Self {
+        let mut chosen = self.clone();
+        chosen.audio = self
+            .audio_tracks
+            .get(track)
+            .cloned()
+            .or_else(|| self.audio.clone());
+        chosen
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +156,29 @@ pub struct VideoStream {
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub codec: String,
+    /// Index among audio streams, which is what `-map 0:a:N` wants.
+    pub index: usize,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub channels: Option<u32>,
+}
+
+impl AudioStream {
+    /// What to call this track in a menu.
+    ///
+    /// The muxer's own title first, since whoever made the file usually said
+    /// something useful ("Commentary", "English 5.1"). Otherwise the language,
+    /// otherwise its number, which is at least honest.
+    pub fn label(&self) -> String {
+        if let Some(title) = self.title.as_ref().filter(|title| !title.trim().is_empty()) {
+            return title.clone();
+        }
+        match (&self.language, self.channels) {
+            (Some(language), Some(channels)) => format!("{language} ({channels}ch)"),
+            (Some(language), None) => language.clone(),
+            (None, _) => format!("Track {}", self.index + 1),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +201,10 @@ struct RawProbe {
 struct RawFormat {
     #[serde(default)]
     duration: Option<String>,
+    /// Bits per second across the whole file. A string, like everything else
+    /// ffprobe reports as a number.
+    #[serde(default)]
+    bit_rate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +215,8 @@ struct RawStream {
     level: Option<i64>,
     width: Option<u32>,
     height: Option<u32>,
+    #[serde(default)]
+    channels: Option<u32>,
     #[serde(default)]
     tags: std::collections::HashMap<String, String>,
 }
@@ -185,6 +263,11 @@ impl Tools {
                 .duration
                 .and_then(|d| d.parse().ok())
                 .unwrap_or(0.0),
+            bit_rate: raw
+                .format
+                .bit_rate
+                .and_then(|rate| rate.parse::<u64>().ok())
+                .filter(|rate| *rate > 0),
             ..Default::default()
         };
 
@@ -207,7 +290,21 @@ impl Tools {
                         });
                     }
                 }
-                "audio" if probe.audio.is_none() => probe.audio = Some(AudioStream { codec }),
+                "audio" => {
+                    let stream = AudioStream {
+                        codec,
+                        index: probe.audio_tracks.len(),
+                        language: stream.tags.get("language").cloned(),
+                        title: stream.tags.get("title").cloned(),
+                        channels: stream.channels,
+                    };
+                    // The first is the default, which is what every player
+                    // does and what the muxer intended.
+                    if probe.audio.is_none() {
+                        probe.audio = Some(stream.clone());
+                    }
+                    probe.audio_tracks.push(stream);
+                }
                 "subtitle" => {
                     let index = probe.subtitles.len();
                     probe.subtitles.push(SubtitleStream {
@@ -230,9 +327,57 @@ pub struct Plan {
     pub copy_audio: bool,
     pub has_video: bool,
     pub has_audio: bool,
+    /// Which audio stream to take, as `-map 0:a:N` counts them.
+    pub audio_track: usize,
+    /// What to encode the video at, in bits per second.
+    pub video_bitrate: u64,
     /// The MIME type MSE needs, including codecs. Getting this wrong is a
     /// silent stall rather than an error, so it is built from measured values.
     pub mime: String,
+}
+
+/// What a given height is worth spending on, in bits per second.
+///
+/// Everything here used to get three megabits regardless, which is wrong at
+/// both ends. A 480p Prelinger short was handed three megabits it could not
+/// use, and every one of them came off somebody's swarm; a 1080p feature was
+/// handed three when it wanted eight, which is why a good release could come
+/// out looking soft.
+fn ceiling_for(height: u32) -> u64 {
+    match height {
+        0..=480 => 1_500_000,
+        481..=576 => 2_000_000,
+        577..=720 => 3_500_000,
+        721..=1080 => 6_000_000,
+        1081..=1440 => 10_000_000,
+        _ => 16_000_000,
+    }
+}
+
+/// The bitrate to encode at, given what the source actually is.
+///
+/// Two rules, and the second matters more than the first. Never spend more than
+/// the resolution is worth, and **never spend more than the source has**:
+/// re-encoding a two megabit source at six adds no detail whatsoever, it only
+/// adds bytes, and on a thin line those bytes are the difference between
+/// watching something and waiting for it.
+pub fn target_bitrate(probe: &Probe) -> u64 {
+    let height = probe.video.as_ref().and_then(|video| video.height);
+    let ceiling = ceiling_for(height.unwrap_or(720));
+
+    // The file's rate includes its audio, so a little is taken off before
+    // treating it as an upper bound for the video alone.
+    let source = probe
+        .bit_rate
+        .map(|rate| rate.saturating_sub(128_000).max(200_000));
+
+    match source {
+        Some(source) => ceiling.min(source),
+        // Nothing measured: the resolution's own figure is the best guess
+        // available, and guessing low would make every unlabelled file look
+        // worse than it is.
+        None => ceiling,
+    }
 }
 
 /// Decide what to do with each stream.
@@ -291,6 +436,8 @@ pub fn plan(probe: &Probe) -> Plan {
         copy_audio,
         has_video: probe.video.is_some(),
         has_audio: probe.audio.is_some(),
+        audio_track: probe.audio.as_ref().map_or(0, |audio| audio.index),
+        video_bitrate: target_bitrate(probe),
         mime: format!("video/mp4; codecs=\"{}\"", codecs.join(",")),
     }
 }
@@ -385,7 +532,10 @@ impl Tools {
             args.extend(["-map".into(), "0:v:0".into()]);
         }
         if plan.has_audio {
-            args.extend(["-map".into(), "0:a:0".into()]);
+            // The chosen track, not simply the first: a film with a commentary
+            // or a second language has more than one, and the muxer's order is
+            // not a preference.
+            args.extend(["-map".into(), format!("0:a:{}", plan.audio_track)]);
         }
 
         if plan.has_video {
@@ -403,7 +553,7 @@ impl Tools {
                     "-pix_fmt".into(),
                     "yuv420p".into(),
                     "-b:v".into(),
-                    "3M".into(),
+                    plan.video_bitrate.to_string(),
                 ]);
                 if encoder == FALLBACK_ENCODER {
                     args.extend(["-preset".into(), "veryfast".into()]);
@@ -461,6 +611,66 @@ impl Tools {
         Ok(output.stdout)
     }
 
+    /// Decode a file's audio to mono `f32` samples at `rate`.
+    ///
+    /// For subtitle alignment, which needs to know when somebody was speaking
+    /// and nothing else, so this throws away the video, the channels above one
+    /// and everything above a few kilohertz before any of it reaches memory. A
+    /// two hour film at 16 kHz mono is about 115 MB of samples, which is why
+    /// `seconds` exists: pass the duration you actually intend to look at.
+    ///
+    /// Reads through balerion's own range endpoint like everything else here,
+    /// so the piece picker steers for it with no extra plumbing. That does mean
+    /// it pulls the whole file off the swarm, which is the honest cost of
+    /// listening to all of it.
+    pub async fn audio_samples(&self, url: &str, rate: u32, seconds: f64) -> Result<Vec<f32>> {
+        let output = tokio::time::timeout(
+            AUDIO_TIMEOUT,
+            Command::new(&self.ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-v",
+                    "error",
+                    "-i",
+                    url,
+                    // First audio stream only. Which one is the right one is a
+                    // separate question; for detecting speech, any of them
+                    // will do.
+                    "-map",
+                    "0:a:0",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    &rate.to_string(),
+                    "-t",
+                    &format!("{seconds}"),
+                    // Raw little-endian floats, so there is no container to
+                    // parse on this side.
+                    "-f",
+                    "f32le",
+                    "pipe:1",
+                ])
+                .stdin(Stdio::null())
+                .output(),
+        )
+        .await
+        .context("ffmpeg took too long decoding the audio")?
+        .context("could not run ffmpeg")?;
+
+        if !output.status.success() {
+            bail!(
+                "ffmpeg could not decode the audio: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        Ok(output
+            .stdout
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect())
+    }
+
     /// Extract an embedded subtitle track as WebVTT.
     pub async fn subtitles(&self, url: &str, track: usize) -> Result<String> {
         let output = tokio::time::timeout(
@@ -507,9 +717,199 @@ pub fn segment_count(duration: f64) -> u32 {
 mod tests {
     use super::*;
 
-    fn probe_with(video: Option<&str>, audio: Option<&str>) -> Probe {
+    /// One audio track, for fixtures that only care about its codec.
+    fn audio(codec: &str) -> AudioStream {
+        AudioStream {
+            codec: codec.to_string(),
+            index: 0,
+            language: None,
+            title: None,
+            channels: Some(2),
+        }
+    }
+
+    fn probe_of(height: u32, bit_rate: Option<u64>) -> Probe {
+        Probe {
+            duration: 3600.0,
+            bit_rate,
+            video: Some(VideoStream {
+                codec: "h264".into(),
+                profile: Some("High".into()),
+                level: Some(40),
+                width: Some(height * 16 / 9),
+                height: Some(height),
+            }),
+            audio: Some(audio("aac")),
+            audio_tracks: vec![audio("aac")],
+            subtitles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_small_source_is_not_handed_a_bitrate_it_cannot_use() {
+        // The Prelinger case: 480p at 900 kbit. Encoding it at three megabits
+        // spends somebody's swarm on nothing anybody can see.
+        let target = target_bitrate(&probe_of(480, Some(900_000)));
+        assert!(target < 1_000_000, "{target}");
+    }
+
+    #[test]
+    fn a_large_source_gets_more_than_the_old_fixed_figure() {
+        // 1080p at 8 megabits used to be re-encoded at three, which is why a
+        // good release could come out looking soft.
+        let target = target_bitrate(&probe_of(1080, Some(8_000_000)));
+        assert!(target > 3_000_000, "{target}");
+        assert!(target <= 6_000_000, "still capped: {target}");
+    }
+
+    #[test]
+    fn we_never_spend_more_than_the_source_has() {
+        // Re-encoding a two megabit source at six adds no detail, only bytes.
+        let target = target_bitrate(&probe_of(1080, Some(2_000_000)));
+        assert!(target < 2_000_000, "{target}");
+    }
+
+    #[test]
+    fn an_unmeasured_source_falls_back_to_what_its_resolution_is_worth() {
+        // Guessing low would make every file ffprobe cannot rate look worse
+        // than it is.
+        assert_eq!(target_bitrate(&probe_of(1080, None)), 6_000_000);
+        assert_eq!(target_bitrate(&probe_of(480, None)), 1_500_000);
+    }
+
+    #[test]
+    fn a_source_of_almost_nothing_still_gets_a_floor() {
+        // A 150 kbit file minus the audio allowance would otherwise come out
+        // negative, or near enough zero to produce an unwatchable encode.
+        let target = target_bitrate(&probe_of(480, Some(150_000)));
+        assert!(target >= 200_000, "{target}");
+    }
+
+    fn track(
+        index: usize,
+        language: Option<&str>,
+        title: Option<&str>,
+        channels: u32,
+    ) -> AudioStream {
+        AudioStream {
+            codec: "ac3".into(),
+            index,
+            language: language.map(str::to_string),
+            title: title.map(str::to_string),
+            channels: Some(channels),
+        }
+    }
+
+    #[test]
+    fn a_track_is_labelled_with_whatever_the_muxer_actually_said() {
+        // Whoever made the file usually wrote something useful, and it beats
+        // anything we could work out.
+        assert_eq!(
+            track(1, Some("eng"), Some("Commentary"), 2).label(),
+            "Commentary"
+        );
+        assert_eq!(track(0, Some("eng"), None, 6).label(), "eng (6ch)");
+        assert_eq!(track(0, Some("fra"), None, 0).label(), "fra (0ch)");
+    }
+
+    #[test]
+    fn a_nameless_track_is_at_least_numbered_honestly() {
+        let anonymous = AudioStream {
+            codec: "aac".into(),
+            index: 2,
+            language: None,
+            title: None,
+            channels: None,
+        };
+        assert_eq!(
+            anonymous.label(),
+            "Track 3",
+            "counted from one for a person"
+        );
+    }
+
+    #[test]
+    fn a_blank_title_falls_through_rather_than_showing_an_empty_menu_entry() {
+        assert_eq!(track(0, Some("eng"), Some("   "), 2).label(), "eng (2ch)");
+    }
+
+    #[test]
+    fn choosing_a_track_changes_what_the_plan_maps_and_copies() {
+        // The fault this prevents: a viewer picks the second track and gets
+        // segments carrying the first, because the plan never heard about it.
+        let mut probe = probe_with(Some("h264"), Some("ac3"));
+        probe.audio_tracks = vec![
+            audio("ac3"),
+            AudioStream {
+                codec: "aac".into(),
+                index: 1,
+                language: Some("eng".into()),
+                title: None,
+                channels: Some(2),
+            },
+        ];
+
+        let first = plan(&probe.with_audio(0));
+        assert_eq!(first.audio_track, 0);
+        assert!(!first.copy_audio, "ac3 has to be re-encoded");
+
+        let second = plan(&probe.with_audio(1));
+        assert_eq!(second.audio_track, 1);
+        assert!(second.copy_audio, "aac can be passed through");
+    }
+
+    #[test]
+    fn asking_for_a_track_that_is_not_there_falls_back_rather_than_failing() {
+        let probe = probe_with(Some("h264"), Some("aac"));
+        assert_eq!(plan(&probe.with_audio(9)).audio_track, 0);
+    }
+
+    #[test]
+    fn a_hardware_encoder_is_preferred_when_ffmpeg_has_one() {
+        assert_eq!(
+            pick_encoder("V..... h264_videotoolbox  VideoToolbox H.264"),
+            "h264_videotoolbox"
+        );
+        assert_eq!(pick_encoder("V..... h264_nvenc  NVIDIA"), "h264_nvenc");
+        assert_eq!(pick_encoder("V..... h264_qsv  QuickSync"), "h264_qsv");
+    }
+
+    #[test]
+    fn software_encoding_is_the_answer_when_there_is_nothing_else() {
+        assert_eq!(pick_encoder("V..... libx264  H.264"), FALLBACK_ENCODER);
+        assert_eq!(pick_encoder(""), FALLBACK_ENCODER);
+    }
+
+    #[test]
+    fn vaapi_is_not_picked_up_by_accident() {
+        // It is not a drop-in name: it needs a render device and a hwupload
+        // filter chain, and choosing it here would produce a player that fails
+        // on every segment.
+        assert_eq!(
+            pick_encoder("V..... h264_vaapi  VAAPI H.264"),
+            FALLBACK_ENCODER
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_video_still_yields_a_plan() {
+        let probe = Probe {
+            duration: 100.0,
+            bit_rate: Some(128_000),
+            video: None,
+            audio: Some(audio("mp3")),
+            audio_tracks: vec![audio("mp3")],
+            subtitles: Vec::new(),
+        };
+        let plan = plan(&probe);
+        assert!(!plan.has_video);
+        assert!(plan.video_bitrate > 0, "unused, but never nonsense");
+    }
+
+    fn probe_with(video: Option<&str>, sound: Option<&str>) -> Probe {
         Probe {
             duration: 60.0,
+            bit_rate: None,
             video: video.map(|codec| VideoStream {
                 codec: codec.to_string(),
                 profile: Some("High".into()),
@@ -517,9 +917,8 @@ mod tests {
                 width: Some(720),
                 height: Some(480),
             }),
-            audio: audio.map(|codec| AudioStream {
-                codec: codec.to_string(),
-            }),
+            audio: sound.map(audio),
+            audio_tracks: sound.map(audio).into_iter().collect(),
             subtitles: Vec::new(),
         }
     }
@@ -628,10 +1027,10 @@ mod tests {
         // one produces a player showing a still image and no controls.
         let art = Probe {
             duration: 200.0,
+            bit_rate: None,
             video: None,
-            audio: Some(AudioStream {
-                codec: "mp3".into(),
-            }),
+            audio: Some(audio("mp3")),
+            audio_tracks: vec![audio("mp3")],
             subtitles: Vec::new(),
         };
         let plan = plan(&art);

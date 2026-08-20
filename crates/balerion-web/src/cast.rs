@@ -35,6 +35,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/play/{hash}/{file}/seg/{index}", get(play::segment))
         .route("/api/play/{hash}/{file}/subs/{track}", get(play::embedded))
         .route("/api/subtitles/{hash}/{file}", get(play::sidecar))
+        .route("/api/subtitles/{hash}/{file}/fetched", get(play::fetched))
         // The file itself, for anything a television can already open.
         .route("/stream/{hash}/{file}", get(stream::handler))
         .with_state(state)

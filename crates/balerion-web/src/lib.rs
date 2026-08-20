@@ -5,21 +5,30 @@
 //! serves the result over HTTP on localhost. The interesting part is that it
 //! serves bytes that have not arrived yet: see [`stream`].
 
+pub mod access;
 pub mod cast;
+pub mod fetched;
 pub mod ffmpeg;
+pub mod find;
 pub mod fmp4;
+pub mod history;
+pub mod library;
 pub mod media;
 pub mod oidc;
 pub mod play;
 pub mod range;
 pub mod relay;
+pub mod release;
 pub mod routes;
 pub mod search;
 pub mod state;
 pub mod stream;
+pub mod subsync;
 pub mod subtitles;
+pub mod supervise;
 pub mod torrent;
 pub mod tpb;
+pub mod whisper;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -43,6 +52,7 @@ impl Default for ServeConfig {
             peer_port: 6881,
             dht_budget: std::time::Duration::from_secs(20),
             tracker_timeout: std::time::Duration::from_secs(10),
+            access_token: None,
             cast_port: None,
         }
     }
@@ -74,23 +84,33 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(routes::index))
         .route("/app.css", get(routes::stylesheet))
         .route("/app.js", get(routes::script))
+        .route("/lib.js", get(routes::library_script))
         .route("/api/play/{hash}/{file}", get(play::info))
         .route("/api/play/{hash}/{file}/index.m3u8", get(play::playlist))
         .route("/api/play/{hash}/{file}/init.mp4", get(play::init))
         .route("/api/play/{hash}/{file}/seg/{index}", get(play::segment))
         .route("/api/play/{hash}/{file}/subs/{track}", get(play::embedded))
         .route("/api/subtitles/{hash}/{file}", get(play::sidecar))
+        .route("/api/subtitles/{hash}/{file}/fetched", get(play::fetched))
+        .route("/api/find", get(find::handler))
+        .route("/api/sources", get(find::list))
         .route("/api/search", get(search::handler))
         .route("/api/shelves", get(search::shelves))
         .route("/api/tpb/search", get(tpb::handler))
         .route("/api/tpb/categories", get(tpb::categories))
         .route("/api/resolve", post(routes::resolve))
         .route("/api/cast", get(routes::cast_info))
+        .route("/api/continue", get(routes::continuing))
+        .route("/api/progress/{hash}/{file}", post(routes::progress))
         .route("/api/torrents", get(routes::list))
         .route("/api/torrents/{hash}", get(routes::stats))
         .route("/api/torrents/{hash}", delete(routes::remove))
         .route("/api/torrents/{hash}/keep", post(routes::keep))
         .route("/stream/{hash}/{file}", get(stream::handler))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            access::guard,
+        ))
         .with_state(state)
 }
 
@@ -101,21 +121,66 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
         .with_context(|| format!("creating {}", config.data_dir.display()))?;
 
     let address = SocketAddr::new(config.host, config.port);
-    if !config.host.is_loopback() {
-        // Worth being loud about: this endpoint downloads whatever magnet it
-        // is handed, so exposing it to a network is a decision, not a default.
-        tracing::warn!(
-            %address,
-            "serving beyond localhost. Anyone who can reach this port can make \
-             balerion download things on your behalf"
-        );
+    let mut config = config;
+
+    // Bound anywhere but loopback, this needs a token. `/api/resolve` downloads
+    // whatever magnet it is handed and `DELETE /api/torrents` deletes what you
+    // were watching, so a log line saying "careful" was never enough. One is
+    // generated rather than demanded: `--host` is a deliberate request, and
+    // answering it with an error would be obstructive where answering it with
+    // a working URL is not.
+    if !config.host.is_loopback() && config.access_token.is_none() {
+        config.access_token = Some(access::generate());
+    }
+
+    // Listen for peers before anything else needs to know the port. Failing to
+    // bind is not fatal: outbound connections still work, they just reach
+    // fewer peers, and a player that refuses to start over a busy port would
+    // be a worse answer than a player that finds fewer seeders.
+    let inbound = match balerion_bt::Inbound::bind(config.peer_port).await {
+        Ok(inbound) => Some(inbound),
+        Err(err) => {
+            tracing::warn!(%err, "could not listen for peers; making outbound connections only");
+            None
+        }
+    };
+    if let Some(inbound) = &inbound {
+        // What we announce is now what we are actually on, which for a while
+        // it was not.
+        config.peer_port = inbound.port();
     }
 
     let mut state = AppState::new(config);
+    state.history = Arc::new(history::History::load(&state.config.data_dir).await);
     state.tools = ffmpeg::Tools::detect().await;
+    state.whisper = whisper::Whisper::detect().await;
+    state.inbound = inbound;
     let has_ffmpeg = state.tools.is_some();
     let state = Arc::new(state);
-    tokio::spawn(routes::sweep(Arc::clone(&state)));
+
+    // What the last run left behind: put back what was kept, collect what was
+    // abandoned. Done before the sweeper starts, so the two cannot race over
+    // the same directory.
+    let found = library::adopt(&state).await;
+    if found.kept > 0 || found.swept > 0 {
+        tracing::info!(
+            kept = found.kept,
+            swept = found.swept,
+            left = found.left,
+            "read the data directory"
+        );
+    }
+
+    // Supervised rather than spawned and forgotten. A panic in either of these
+    // used to be absorbed by the runtime and reported nowhere: the sweeper
+    // simply stopped sweeping for ever, and the first anyone would know is a
+    // disk filling up a fortnight later.
+    let sweeping = Arc::clone(&state);
+    supervise::forever("sweeper", move || routes::sweep(Arc::clone(&sweeping)));
+    let writing = Arc::clone(&state.history);
+    supervise::forever("history", move || {
+        history::keep_written(Arc::clone(&writing))
+    });
 
     let listener = tokio::net::TcpListener::bind(address)
         .await
@@ -132,7 +197,21 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
     };
     *state.self_base.lock().expect("self_base lock") = format!("http://{reachable}");
 
-    println!("Balerion is serving at http://{bound}");
+    match &state.config.access_token {
+        // Said on stdout with the other startup lines rather than through the
+        // log, because it is the address the user has to type and a warning
+        // nobody sees is a warning nobody acts on.
+        Some(token) => {
+            println!("Balerion is serving at http://{bound}");
+            println!();
+            println!("This is reachable from the network, so it is gated. Open:");
+            println!("  http://{bound}/?{}={token}", access::TOKEN);
+            println!("Anyone with that link can make balerion download and delete things.");
+            println!("Requests from this machine are let through without it.");
+            println!();
+        }
+        None => println!("Balerion is serving at http://{bound}"),
+    }
     if has_ffmpeg {
         println!("ffmpeg found: files browsers cannot open will be converted as they play.");
     } else {
@@ -161,12 +240,17 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
 
     println!("paste a magnet link to start watching. Ctrl-C to stop.");
 
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            println!("\nstopping");
-        })
-        .await
-        .context("the server stopped unexpectedly")?;
+    // ConnectInfo, so the guard can tell a request from this machine from one
+    // off the network.
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        println!("\nstopping");
+    })
+    .await
+    .context("the server stopped unexpectedly")?;
     Ok(())
 }

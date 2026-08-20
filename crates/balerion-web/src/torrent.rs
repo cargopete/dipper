@@ -17,7 +17,7 @@ use balerion_bt::{Dht, Magnet, Metainfo, Strategy, peer, session};
 use balerion_ia::{IaClient, metadata, torrent as ia_torrent};
 use tokio::task::JoinHandle;
 
-use crate::state::{ServeConfig, Torrent};
+use crate::state::{Clock, ServeConfig, Torrent};
 
 /// How many peers to ask for the metadata at once.
 const METADATA_PEERS: usize = 8;
@@ -125,6 +125,28 @@ fn urlencode(value: &str) -> String {
 /// Find peers, and the torrent metadata if we do not have it yet.
 pub async fn resolve(input: &Input, config: &ServeConfig) -> Result<(Metainfo, Vec<SocketAddr>)> {
     let magnet = &input.magnet();
+
+    /* An archive.org item needs no peers whatsoever: it arrives with a webseed
+     * that serves the whole file over HTTPS, and its trackers refuse
+     * third-party seeding so there is nobody in the swarm to find. Running
+     * discovery anyway meant waiting out the full DHT budget and every tracker
+     * timeout before playing something whose file list we already had.
+     *
+     * Measured before this existed: fifty seconds to open a Popeye cartoon, of
+     * which one was the metadata and forty-nine were spent looking for peers
+     * that do not exist. `spawn_refill` already declined to announce for
+     * webseeded torrents for the same reason; this is the other half of it. */
+    if let Input::Complete(meta) = input
+        && !meta.webseeds.is_empty()
+        && config.use_webseeds
+    {
+        tracing::debug!(
+            name = meta.name,
+            webseeds = meta.webseeds.len(),
+            "webseeded torrent; not looking for peers that are not there"
+        );
+        return Ok(((**meta).clone(), Vec::new()));
+    }
     let dht = if config.use_dht {
         match Dht::client() {
             Ok(dht) => Some(dht),
@@ -180,16 +202,21 @@ pub async fn resolve(input: &Input, config: &ServeConfig) -> Result<(Metainfo, V
             let mut asked = 0usize;
             let mut last_error = None;
             let mut candidates = peers.clone();
+            // Addresses the peers we spoke to introduced us to over BEP 11.
+            // These are frequently better than anything a tracker returns,
+            // because they come from something demonstrably in the swarm now.
+            let mut introduced: Vec<SocketAddr> = Vec::new();
 
             loop {
                 if !candidates.is_empty() {
                     asked += candidates.len();
-                    match peer::fetch_metadata_from_peers(
+                    match peer::fetch_metadata_collecting(
                         &candidates,
                         magnet.info_hash,
                         generate_peer_id(),
                         config.peer_port,
                         METADATA_PEERS,
+                        &mut introduced,
                     )
                     .await
                     {
@@ -218,6 +245,13 @@ pub async fn resolve(input: &Input, config: &ServeConfig) -> Result<(Metainfo, V
                 // another connection.
                 let before: std::collections::HashSet<SocketAddr> =
                     discovery.peers().into_iter().collect();
+                // Peer exchange first: it costs nothing, it has already
+                // happened, and on a swarm where the tracker's list is spent it
+                // is the only source still producing anything.
+                let from_pex = discovery.add(introduced.drain(..));
+                if from_pex > 0 {
+                    tracing::debug!(from_pex, "peer exchange named addresses we had not tried");
+                }
                 discovery
                     .run(
                         magnet,
@@ -262,11 +296,17 @@ pub async fn start(
     peers: Vec<SocketAddr>,
     root: &Path,
     config: &ServeConfig,
+    inbound: Option<balerion_bt::Inbound>,
+    clock: Arc<Clock>,
 ) -> Result<Arc<Torrent>> {
     let download = DownloadConfig {
         max_peers: config.max_peers,
         pipeline_depth: config.pipeline_depth,
+        // `config.peer_port` is the port actually bound, not the one asked
+        // for: `serve` overwrites it once the listener is up, so what we
+        // announce and what we are on cannot drift apart.
         port: config.peer_port,
+        inbound,
         verify: VerifyPolicy::Auto,
         // This caller does re-announce, so the engine should wait to be fed
         // rather than concluding the swarm is dead the moment its list runs dry.
@@ -277,9 +317,30 @@ pub async fn start(
         ..Default::default()
     };
 
-    let (handle, task) = session::spawn(&meta, root, peers, &download)
+    // Watching the progress stream rather than discarding it, so the first peer
+    // and the first piece are recorded as they happen instead of being guessed
+    // at afterwards from a poll.
+    let marks = Arc::clone(&clock);
+    let name = meta.name.clone();
+    let (handle, task) =
+        session::spawn_with_progress(&meta, root, peers, &download, move |update| match update {
+            balerion_bt::Progress::PeerConnected { .. } => marks.first_peer(),
+            balerion_bt::Progress::Piece { .. } => {
+                let first = marks.snapshot().first_piece_ms.is_none();
+                marks.first_piece();
+                if first {
+                    tracing::info!(name, timings = ?marks.snapshot(), "first piece down");
+                }
+            }
+            _ => {}
+        })
         .await
         .context("could not start the download")?;
+
+    // Leave a torrent file beside the data. Without it the directory is an
+    // anonymous pile of bytes and the next run cannot tell what is in it
+    // without going back to the swarm to ask something we already know.
+    crate::library::remember(root, &meta).await;
 
     let refill = spawn_refill(&meta, handle.clone(), config);
 
@@ -289,6 +350,7 @@ pub async fn start(
         task,
         refill,
         root.to_path_buf(),
+        clock,
     )))
 }
 

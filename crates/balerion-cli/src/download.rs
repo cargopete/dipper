@@ -18,6 +18,8 @@ use crate::torrent_source::Source;
 pub struct EngineOptions {
     pub no_dht: bool,
     pub no_webseeds: bool,
+    /// Retry an obfuscated handshake when a plaintext one is refused.
+    pub use_encryption: bool,
     pub port: u16,
     pub max_peers: usize,
     pub dht_budget: Duration,
@@ -25,6 +27,31 @@ pub struct EngineOptions {
     /// Force a full re-hash of existing data.
     pub verify: bool,
     pub quiet: bool,
+    /// The socket peers dial to reach us, when one could be bound.
+    ///
+    /// Set by [`EngineOptions::listen`] rather than by the argument parser,
+    /// because the port it ends up on may not be the port that was asked for.
+    pub inbound: Option<balerion_bt::Inbound>,
+}
+
+impl EngineOptions {
+    /// Start listening for peers, and announce whatever port we ended up on.
+    ///
+    /// Failing to bind costs reach and nothing else, so it is a warning rather
+    /// than an error: a download that refuses to start because some other
+    /// program holds port 6881 would be a poor trade.
+    pub async fn listen(mut self) -> Self {
+        match balerion_bt::Inbound::bind(self.port).await {
+            Ok(inbound) => {
+                self.port = inbound.port();
+                self.inbound = Some(inbound);
+            }
+            Err(err) => {
+                tracing::warn!(%err, "could not listen for peers; making outbound connections only");
+            }
+        }
+        self
+    }
 }
 
 impl Default for EngineOptions {
@@ -32,12 +59,14 @@ impl Default for EngineOptions {
         Self {
             no_dht: false,
             no_webseeds: false,
+            use_encryption: true,
             port: 6881,
             max_peers: 30,
             dht_budget: Duration::from_secs(20),
             tracker_timeout: Duration::from_secs(10),
             verify: false,
             quiet: false,
+            inbound: None,
         }
     }
 }
@@ -218,6 +247,8 @@ pub async fn download_command(
     let config = DownloadConfig {
         max_peers: options.max_peers,
         port: options.port,
+        use_encryption: options.use_encryption,
+        inbound: options.inbound.clone(),
         verify: if options.verify {
             VerifyPolicy::Always
         } else {

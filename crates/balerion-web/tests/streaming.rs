@@ -185,6 +185,9 @@ async fn harness() -> Harness {
             task,
             tokio::spawn(async {}),
             root.clone(),
+            std::sync::Arc::new(balerion_web::state::Clock::started(
+                std::time::Instant::now(),
+            )),
         )),
     );
 

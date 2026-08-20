@@ -94,6 +94,13 @@
     </form>
   </section>
 
+  <!-- Things you are part way through. Drawn before the search results,
+       because on most evenings it is the answer. -->
+  <section id="continuing" hidden aria-labelledby="continuing-heading">
+    <h2 id="continuing-heading">Carry on watching</h2>
+    <ul id="continuing-list"></ul>
+  </section>
+
   <section id="results" hidden aria-labelledby="results-heading">
     <div class="results-head">
       <h2 id="results-heading">Results</h2>
@@ -144,10 +151,19 @@
         <!-- x-webkit-airplay is what puts the AirPlay button in Safari's own
              controls. It only does anything for media the receiver can fetch
              itself, which is why transcoded files are given the playlist rather
-             than a MediaSource blob when the browser will take one. -->
+             than a MediaSource blob when the browser will take one, and why the
+             src points at the cast listener's address rather than at loopback
+             whenever there is one. An Apple TV handed 127.0.0.1 reaches
+             nothing, which is what made the button appear to do nothing. -->
         <video id="video" controls playsinline preload="metadata"
                x-webkit-airplay="allow"></video>
         <p class="viewer-note" id="viewer-note" hidden></p>
+        <!-- Only shown when a file genuinely has more than one track. A menu
+             of one is a menu that should not be there. -->
+        <div class="audio-row" id="audio-row" hidden>
+          <label for="audio-tracks">Audio</label>
+          <select id="audio-tracks"></select>
+        </div>
       </div>
 
       <aside class="telemetry" aria-label="Download telemetry">
@@ -206,6 +222,8 @@
   <p>Balerion runs on your machine. Nothing here is sent to anyone else.</p>
 </footer>
 
+<!-- The arithmetic first: app.js reads its functions off the window. -->
+<script src="/lib.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

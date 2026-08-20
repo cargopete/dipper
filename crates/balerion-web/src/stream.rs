@@ -98,6 +98,10 @@ pub async fn handler(
     };
 
     let served = end - start;
+    // The moment the player has something to work with. Measured at the
+    // response rather than at the last byte, because this is the number a
+    // viewer feels: the gap between clicking and the picture appearing.
+    torrent.clock.first_byte();
     prioritise(&torrent, (offset, length), offset + start, served).await;
 
     let mut response = HeaderMap::new();

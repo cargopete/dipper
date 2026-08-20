@@ -32,13 +32,27 @@ magnet alone cannot resolve. balerion fetches the derived `.torrent` over HTTPS
 instead, which is what makes the Archive's public domain film collections
 usable here at all.
 
-### Two indexes behind the one search bar
+### Several indexes behind the one search bar
 
-The search bar asks either archive.org or apibay, the JSON endpoint behind
-thepiratebay's frontend. Both hand the resolver something it already accepts:
-the Archive gives an item identifier, apibay gives a magnet assembled locally
-from the infohash it returns. Neither the resolver nor the engine below it is
-told which happened, which is the same provenance-agnostic split the CLI has.
+The search bar asks archive.org, apibay (the JSON endpoint behind thepiratebay's
+frontend), and any Torznab indexer you point it at. All of them hand the
+resolver something it already accepts: the Archive gives an item identifier, the
+others give a magnet. Neither the resolver nor the engine below it is told which
+happened, which is the same provenance-agnostic split the CLI has.
+
+`/api/find` asks whichever of them you asked for, at once, and merges the
+answers. One index being slow or down does not hold up the rest, and results
+that are the same torrent are folded into one row keyed on the infohash, which
+is the only identifier two indexes will ever agree on. That is not a nicety:
+four copies of the same episode is exactly what breaks picking one and playing
+it.
+
+**Torznab** is worth a paragraph, because one client reaches Prowlarr, Jackett,
+Zilean and bitmagnet alike. Set `BALERION_TORZNAB` to a comma-separated list of
+`name=url` entries and `BALERION_TORZNAB_KEY` to the key your indexer issued.
+It also sidesteps the awkwardness apibay causes: a Torznab indexer runs on your
+own machine by definition, so there is no bot challenge and no relay, and the
+credential is one the indexer issued rather than one balerion invented.
 
 apibay searches are restricted to video categories, and never to `cat=0`, which
 searches everything including the adult categories and will return them for an
@@ -134,11 +148,26 @@ the whole player to the LAN instead would hand them `/api/resolve`, which
 downloads whatever magnet it is given.
 
 Transcoded files are served as HLS over the same fragmented MP4 segments the
-browser already uses, so one representation feeds the browser, AirPlay and
-Chromecast alike. Safari plays that playlist natively, which is what makes its
-AirPlay button work; other browsers keep using MediaSource for now. The player
-shows the address to hand a receiver, since working out your own is nobody's idea
-of a feature.
+browser already uses, so one representation feeds the browser and any receiver
+alike. Safari plays that playlist natively, which is what makes its AirPlay
+button work; other browsers keep using MediaSource for now.
+
+The detail that made the difference: AirPlay does not mirror a video element, it
+hands the receiver a URL and lets the receiver fetch the media. An Apple TV given
+`http://127.0.0.1:8080/...` reaches nothing, so the button used to appear to do
+nothing at all. With `--cast-port` on, playback is pointed at the cast listener's
+LAN address instead, which serves exactly the same bytes and is the only URL a
+receiver can act on. The player also shows that address, since working out your
+own is nobody's idea of a feature.
+
+**Chromecast is not properly supported**, and the difference is worth stating.
+AirPlay works because Safari has a button and the operating system does the
+handoff. A Chromecast needs the page to speak to it through Google's Cast SDK,
+which is a script loaded from `gstatic.com` — and this page currently loads
+nothing from anywhere, which is a promise in the footer rather than an accident.
+So what you get for a Chromecast today is the URL, to paste into whatever you
+already use to send one. Doing it properly is a decision about that promise, not
+a piece of missing code.
 
 Off unless asked for, because it is the only setting that exposes nothing.
 
@@ -164,17 +193,79 @@ Without ffmpeg, balerion behaves as it always did: those files are listed with a
 explanation and a download link. Transcoding is an enhancement, not a
 requirement, and the binary still works on its own.
 
-Subtitles are picked up too, both `.srt` files sitting beside the video and
-tracks embedded in it, converted to WebVTT. SubRip files are frequently not
-UTF-8, so they fall back to a Windows-1252 decode rather than filling the
-screen with replacement characters.
+### Subtitles that match the speech
+
+Subtitles are picked up from wherever they are: `.srt` files sitting beside the
+video, tracks embedded in it, OpenSubtitles when the release carries neither,
+and failing all of that, transcribed from the audio. All of it converted to
+WebVTT. SubRip files are frequently not UTF-8, so they fall back to a
+Windows-1252 decode rather than filling the screen with replacement characters.
+
+Three separate faults hide under "the subtitles are wrong", and only one of them
+is that there are none.
+
+**A constant offset.** A file timed against a different release starts at a
+different point, because that release had a different leader, a different logo,
+or a different cut.
+
+**Framerate drift.** The one that ruins an evening. A file timed against a 25 fps
+PAL transfer, played against 23.976, drifts by 4.3%: perfectly correct at the
+opening titles and nearly four minutes out by the end of a feature. No constant
+offset fixes it, and nudging it right at minute ten means nudging it again at
+minute twenty.
+
+So a track that did not come out of the file itself is checked against the
+speech before anyone sees it. Both sides are reduced to "was somebody speaking
+during this ten millisecond window", giving two long strings of yes and no, and
+the question becomes how far to slide one along the other for the best
+agreement. That is a cross-correlation, an FFT does it in a moment, and it is
+entirely indifferent to what language is being spoken. Framerate ratios are
+tried alongside offsets, so drift is found rather than merely averaged over.
+
+It refuses rather than guesses. Below a confidence threshold the track is served
+exactly as its author wrote it, with a `NOTE` saying so, because a track that is
+slightly out is annoying and one that has been confidently moved somewhere worse
+is how you learn to turn the feature off.
+
+Two sources beyond the torrent, if you want them. `OPENSUBTITLES_API_KEY` turns
+on their index, and a match on their file hash is the good case: it means
+subtitles timed against this exact release, so nothing needs correcting at all.
+Their hash is the file size plus the first and last 64 KiB, which suits balerion
+unusually well, since the head is the first thing the picker fetches and the
+tail is kept warm anyway for the index box. Be warned that the free allowance is
+five to ten downloads a day, so the search happens when a file is opened and the
+download only when you actually turn the track on.
+
+And whisper.cpp, if it is on your PATH with a model (`BALERION_WHISPER_MODEL`,
+or `BALERION_WHISPER_BIN` for the binary). That is the last resort and the only
+one that always works: no account, no allowance, no luck. It is in step with the
+audio by construction, because it came from the audio, and its translate task
+answers the other half of "English subtitles", which is a film that is not in
+English. It is not cheap, so it runs in the background and the result is kept.
 
 Streaming *is* downloading: every piece is SHA-1 verified and written to disk,
 so anything you watch is also saved. Torrents live in the user cache directory
 and are swept once nobody has watched them for fifteen minutes. Tick **Keep
 offline** to stop that and fetch the whole thing.
 
-Serving flags: `--port`, `--host`, `-o <dir>`, `--low-bandwidth`.
+That survives a restart now, which for a long time it did not. Each download
+carries a `.torrent` of its own, so its directory can say what it holds without
+going back to the swarm to ask. At startup balerion reads them: kept torrents go
+back in the library, and abandoned ones are collected. Before that, ticking
+**Keep offline** bought you a torrent that vanished from the library while its
+bytes sat on disk, and an unkept one that the sweeper could no longer see and
+therefore never removed.
+
+Serving flags: `--port`, `--host`, `--token`, `-o <dir>`, `--low-bandwidth`.
+
+`--host` needs a word. Bound anywhere but loopback, the player is gated by a
+token, and one is generated and printed if you did not choose your own with
+`--token`. This is not decoration: `/api/resolve` downloads whatever magnet it
+is handed and `DELETE /api/torrents/{hash}` deletes what you were watching, and
+until recently the only thing standing between those and everyone on the wifi
+was a line in the log. Requests from the machine itself are never asked for the
+token, which is what keeps the transcoder, which reads back through balerion's
+own range endpoint, from having to authenticate to it.
 
 `--low-bandwidth` is worth knowing about. balerion normally keeps a quarter of a
 megabyte of requests outstanding per peer, which across thirty peers is a lot
@@ -221,8 +312,8 @@ file next to the download records which pieces verified, so a restart does not
 mean re-reading the lot. It is only trusted when it was written cleanly; after
 a kill -9 balerion falls back to re-hashing, and `--verify` forces that anyway.
 
-Engine flags: `--no-dht`, `--no-webseeds`, `--port`, `--max-peers`,
-`--dht-seconds`, `--verify`, `--quiet`.
+Engine flags: `--no-dht`, `--no-webseeds`, `--no-encryption`, `--port`,
+`--max-peers`, `--dht-seconds`, `--verify`, `--quiet`.
 
 ## Search archive.org
 
@@ -258,7 +349,8 @@ requests, default 350), `--polite`, `-v`. Set `IA_ACCESS_KEY` and
 | 15 | UDP trackers | yes |
 | 19 | HTTP/GetRight webseeds | yes |
 | 23 | Compact peer lists | yes |
-| 11 | PEX | not yet |
+| 11 | `ut_pex`: peer exchange | yes (reading; we do not send) |
+| 8 | MSE/PE: obfuscated connections | yes (dialling out) |
 | 29 | uTP | no |
 | 52 | BitTorrent v2 | no (v2-only magnets are refused with an explanation) |
 
@@ -270,6 +362,33 @@ only for torrents you asked to keep, so a 900 MB extras track cannot compete
 with the film you are watching.
 Every piece is SHA-1 verified before it is written, whether it came from a peer
 or a webseed. Uploading is not implemented: balerion leeches, and says so.
+
+It does now accept connections as well as make them. The announced port used to
+be a port nothing was listening on, which is a small lie with a real cost: a
+peer behind a NAT can dial you and cannot be dialled, so every one of them was
+unreachable in both directions at once. One socket serves every torrent in the
+process, since a peer picks its swarm by putting an infohash in its handshake.
+An accepted peer is still one we only take from.
+
+Peer exchange is read for the same reason. `ut_pex` was already advertised in
+our extended handshake, so peers were being asked to tell us who else was in the
+swarm and the answers were being dropped on the floor. On a public swarm most of
+what a tracker names is unreachable and the peer that will actually answer is
+frequently one only another peer knows about, which is exactly the case where a
+magnet fails to resolve at all.
+
+Connections can be obfuscated, which is worth being precise about because it is
+not a security feature and nobody in this protocol pretends otherwise: the key
+exchange is unauthenticated and the cipher is RC4. It is here because a
+meaningful share of public-swarm peers are configured to refuse a plaintext
+connection outright, and some consumer ISPs still shape one. Without it those
+peers are simply invisible.
+
+Plaintext is tried first, which is the cheap order: most peers take it, so the
+common case pays nothing, and a peer that requires encryption drops the
+connection at the handshake, which is the failure we retry. The cost is one
+extra dial to an address that accepted a socket and then hung up, and on a
+public swarm that is a great many of them, so `--no-encryption` turns it off.
 
 ## The magnet bootstrap
 
@@ -308,6 +427,8 @@ tokens, so there is no shared secret. See [site/README.md](site/README.md).
 | `balerion-bt` | the engine: magnet, bencode, metainfo, trackers, DHT, peer wire, picker, storage, webseeds |
 | `balerion-ia` | archive.org client: metadata API, search |
 | `balerion-tpb` | apibay client: search, and magnets built from the infohash |
+| `balerion-torznab` | Torznab client: Prowlarr, Jackett, Zilean, bitmagnet, anything that speaks it |
+| `balerion-osdb` | OpenSubtitles client: the file hash, the search, and one download |
 | `balerion-index` | local tantivy catalogue over harvested metadata |
 | `balerion-web` | the local player: range-driven streaming, on-demand transcoding, page embedded in the binary |
 | `balerion-cli` | the `balerion` binary |

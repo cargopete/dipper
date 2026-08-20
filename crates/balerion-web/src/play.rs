@@ -12,18 +12,18 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use balerion_bt::InfoHash;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ffmpeg::{self, Plan, Probe};
 use crate::fmp4;
 use crate::media::{self, Playback};
 use crate::routes::ApiError;
 use crate::state::{AppState, Torrent};
-use crate::subtitles;
+use crate::{subsync, subtitles};
 
 /// How the page should play a file.
 #[derive(Debug, Serialize)]
@@ -32,10 +32,16 @@ pub enum PlayInfo {
     /// Browsers open this as it is. Use `/stream`.
     Direct {
         url: String,
+        /// Seconds to start at, when this was watched before and not finished.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume_at: Option<f64>,
         /// Size of this file, so the page can work out its bitrate once the
         /// browser reports a duration, and say whether the swarm can keep up.
         length: u64,
         tracks: Vec<Track>,
+        /// True while subtitles are being transcribed from the audio, so the
+        /// page can say "not yet" rather than "there are none".
+        subtitles_pending: bool,
     },
     /// Not yet. The file is still arriving and nothing can be said about it.
     ///
@@ -53,6 +59,9 @@ pub enum PlayInfo {
     /// Needs converting. Drive MediaSource against the segment endpoints.
     Transcode {
         mime: String,
+        /// Seconds to start at, when this was watched before and not finished.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume_at: Option<f64>,
         duration: f64,
         /// Size of this file. Divided by duration this gives the bitrate
         /// playback must be fed at, which is the only figure that decides
@@ -62,6 +71,12 @@ pub enum PlayInfo {
         segment_seconds: f64,
         init: String,
         segment_prefix: String,
+        /// Appended to every segment URL, carrying the audio choice when it is
+        /// not the default. Separate from the prefix because the index goes
+        /// between them.
+        segment_suffix: String,
+        /// Which audio track this plan describes.
+        audio: usize,
         /// An HLS playlist covering the same segments.
         ///
         /// Safari plays this natively, which is also what makes AirPlay work:
@@ -69,12 +84,29 @@ pub enum PlayInfo {
         /// cannot do with a MediaSource blob.
         playlist: String,
         tracks: Vec<Track>,
+        /// Every audio track in the file, when there is more than one.
+        ///
+        /// Empty for the ordinary case of a single track, so a page that does
+        /// nothing with this shows no menu rather than a menu of one.
+        audio_tracks: Vec<AudioTrack>,
+        /// True while subtitles are being transcribed from the audio.
+        subtitles_pending: bool,
         /// True when only the wrapper is being changed, which is worth saying
         /// because it is the cheap case and the quality is untouched.
         remux_only: bool,
     },
     /// Nothing we can do for this one.
     Unsupported { reason: String, download: String },
+}
+
+/// An audio track the page can offer.
+#[derive(Debug, Serialize)]
+pub struct AudioTrack {
+    /// What to put in `?audio=` to select it.
+    pub index: usize,
+    pub label: String,
+    pub language: Option<String>,
+    pub channels: Option<u32>,
 }
 
 /// A subtitle track the page can offer.
@@ -99,6 +131,7 @@ fn torrent(state: &AppState, hash: &InfoHash) -> Result<Arc<Torrent>, ApiError> 
 pub async fn info(
     State(state): State<Arc<AppState>>,
     Path((hash, file)): Path<(String, usize)>,
+    Query(choice): Query<AudioChoice>,
 ) -> Result<Json<PlayInfo>, ApiError> {
     let info_hash = parse(&hash)?;
     let torrent = torrent(&state, &info_hash)?;
@@ -112,14 +145,18 @@ pub async fn info(
     let stream_url = format!("/stream/{hash}/{file}");
     let download = format!("{stream_url}?download=true");
     let classified = media::classify(&entry.path);
-    let tracks = sidecar_tracks(&torrent, file, &hash);
+    let mut tracks = sidecar_tracks(&torrent, file, &hash);
 
     // The cheap path, and the common one.
     if classified.playback == Playback::Native {
+        let subtitles_pending =
+            add_fetched_track(&state, &info_hash, file, &hash, &mut tracks).await;
         return Ok(Json(PlayInfo::Direct {
             url: stream_url,
+            resume_at: state.history.get(&hash, file).and_then(|at| at.resume_at()),
             length: entry.length,
             tracks,
+            subtitles_pending,
         }));
     }
 
@@ -178,20 +215,37 @@ pub async fn info(
         }));
     }
 
-    let plan = ffmpeg::plan(&probe);
-    let mut tracks = tracks;
+    // The plan depends on which audio track was chosen, because the declared
+    // codec string changes with it: one track may be AAC and passed through
+    // where another is AC-3 and re-encoded. Getting that wrong is a silent
+    // stall rather than an error.
+    let track = choice
+        .track()
+        .min(probe.audio_tracks.len().saturating_sub(1));
+    let plan = ffmpeg::plan(&probe.with_audio(track));
+    let suffix = if track == 0 {
+        String::new()
+    } else {
+        format!("?audio={track}")
+    };
     tracks.extend(embedded_tracks(&probe, &hash, file));
+    let subtitles_pending = add_fetched_track(&state, &info_hash, file, &hash, &mut tracks).await;
 
     Ok(Json(PlayInfo::Transcode {
         mime: plan.mime.clone(),
+        resume_at: state.history.get(&hash, file).and_then(|at| at.resume_at()),
         duration: probe.duration,
         length: entry.length,
         segments: ffmpeg::segment_count(probe.duration),
         segment_seconds: ffmpeg::SEGMENT_SECONDS,
-        init: format!("/api/play/{hash}/{file}/init.mp4"),
+        init: format!("/api/play/{hash}/{file}/init.mp4{suffix}"),
         segment_prefix: format!("/api/play/{hash}/{file}/seg/"),
-        playlist: format!("/api/play/{hash}/{file}/index.m3u8"),
+        segment_suffix: suffix.clone(),
+        playlist: format!("/api/play/{hash}/{file}/index.m3u8{suffix}"),
+        audio: track,
         tracks,
+        audio_tracks: audio_tracks(&probe),
+        subtitles_pending,
         remux_only: plan.copy_video && (plan.copy_audio || !plan.has_audio),
     }))
 }
@@ -210,12 +264,88 @@ fn sidecar_tracks(torrent: &Torrent, file: usize, hash: &str) -> Vec<Track> {
         .map(|(index, candidate)| {
             let name = candidate.path.rsplit('/').next().unwrap_or(&candidate.path);
             Track {
-                url: format!("/api/subtitles/{hash}/{index}"),
+                // The video index comes along because aligning the
+                // subtitles to the speech means knowing which speech.
+                url: format!("/api/subtitles/{hash}/{index}?video={file}"),
                 label: name.to_string(),
                 language: subtitles::language_of(&candidate.path),
             }
         })
         .collect()
+}
+
+/// The audio tracks worth offering a choice between.
+///
+/// Empty when there is only one, because a menu with a single entry is a menu
+/// that should not be there.
+fn audio_tracks(probe: &Probe) -> Vec<AudioTrack> {
+    if probe.audio_tracks.len() < 2 {
+        return Vec::new();
+    }
+    probe
+        .audio_tracks
+        .iter()
+        .map(|track| AudioTrack {
+            index: track.index,
+            label: track.label(),
+            language: track.language.clone(),
+            channels: track.channels,
+        })
+        .collect()
+}
+
+/// Offer a track from OpenSubtitles, when the release came with none.
+///
+/// Only when there is nothing already, and deliberately so. A release that
+/// carries its own subtitles has ones that match it, and spending a request on
+/// a second opinion would be work for its own sake against an allowance of five
+/// a day.
+///
+/// The search happens here and the download does not: the URL points at an
+/// endpoint the browser only fetches when a viewer turns the track on.
+async fn add_fetched_track(
+    state: &Arc<AppState>,
+    info_hash: &balerion_bt::InfoHash,
+    file: usize,
+    hash: &str,
+    tracks: &mut Vec<Track>,
+) -> bool {
+    if !tracks.is_empty() {
+        return false;
+    }
+
+    // Something is already on disk: fetched last time, or transcribed. Offered
+    // without asking anybody anything.
+    if crate::fetched::is_cached(state, info_hash, file).await {
+        tracks.push(Track {
+            url: format!("/api/subtitles/{hash}/{file}/fetched"),
+            label: "English (found for you)".to_string(),
+            language: Some("en".into()),
+        });
+        return false;
+    }
+
+    let offer = match crate::fetched::look(state, info_hash, file).await {
+        Some(offer) => offer,
+        // Nobody has any. Make some, if this machine can, and say that a job
+        // is running so the page can tell the difference between "there are no
+        // subtitles" and "there are none yet".
+        None => return crate::fetched::transcribe(state, info_hash, file),
+    };
+
+    // The label says where these came from and how well they fit, because
+    // "English" alone would make a title match look like a promise.
+    let label = match (offer.exact, offer.best.machine_translated) {
+        (true, _) => "English (matched to this file)".to_string(),
+        (false, true) => "English (fetched, machine translated)".to_string(),
+        (false, false) => "English (fetched)".to_string(),
+    };
+    tracks.push(Track {
+        url: format!("/api/subtitles/{hash}/{file}/fetched"),
+        label,
+        language: offer.best.language.clone().or_else(|| Some("en".into())),
+    });
+    false
 }
 
 /// Subtitle streams inside the video file itself.
@@ -235,12 +365,27 @@ fn embedded_tracks(probe: &Probe, hash: &str, file: usize) -> Vec<Track> {
         .collect()
 }
 
+/// Which audio track to use, when a file has more than one.
+#[derive(Debug, Default, Deserialize)]
+pub struct AudioChoice {
+    /// Index among the audio streams. Absent means the first, which is what
+    /// the muxer intended and what every player does.
+    pub audio: Option<usize>,
+}
+
+impl AudioChoice {
+    fn track(&self) -> usize {
+        self.audio.unwrap_or(0)
+    }
+}
+
 /// The MSE initialisation segment: `ftyp` and `moov`.
 pub async fn init(
     State(state): State<Arc<AppState>>,
     Path((hash, file)): Path<(String, usize)>,
+    Query(choice): Query<AudioChoice>,
 ) -> Result<Response, ApiError> {
-    let data = generate(&state, &hash, file, 0).await?;
+    let data = generate(&state, &hash, file, 0, choice.track()).await?;
     let init = fmp4::init_segment(&data)
         .ok_or_else(|| ApiError::server("ffmpeg produced no initialisation segment"))?;
     Ok(mp4_response(init.to_vec()))
@@ -250,8 +395,9 @@ pub async fn init(
 pub async fn segment(
     State(state): State<Arc<AppState>>,
     Path((hash, file, index)): Path<(String, usize, u32)>,
+    Query(choice): Query<AudioChoice>,
 ) -> Result<Response, ApiError> {
-    let data = generate(&state, &hash, file, index).await?;
+    let data = generate(&state, &hash, file, index, choice.track()).await?;
     let media = fmp4::media_segment(&data)
         .ok_or_else(|| ApiError::server("ffmpeg produced no fragment for that segment"))?;
     Ok(mp4_response(media.to_vec()))
@@ -263,6 +409,7 @@ async fn generate(
     hash: &str,
     file: usize,
     index: u32,
+    audio: usize,
 ) -> Result<Arc<Vec<u8>>, ApiError> {
     let info_hash = parse(hash)?;
     let torrent = torrent(state, &info_hash)?;
@@ -271,7 +418,9 @@ async fn generate(
     }
     torrent.touch();
 
-    if let Some(cached) = state.cached_segment(&info_hash, file, index) {
+    // Keyed by the audio track as well, or switching tracks would be answered
+    // with segments carrying the old one.
+    if let Some(cached) = state.cached_segment(&info_hash, file, index, audio) {
         return Ok(cached);
     }
 
@@ -296,7 +445,7 @@ async fn generate(
         )));
     }
 
-    let plan: Plan = ffmpeg::plan(&probe);
+    let plan: Plan = ffmpeg::plan(&probe.with_audio(audio));
 
     // Bounded so a viewer scrubbing wildly cannot spawn an unbounded number of
     // encoders and starve the download that feeds them.
@@ -307,7 +456,7 @@ async fn generate(
         .map_err(|_| ApiError::server("the transcoder is shutting down"))?;
 
     // Check again: another request may have produced it while we queued.
-    if let Some(cached) = state.cached_segment(&info_hash, file, index) {
+    if let Some(cached) = state.cached_segment(&info_hash, file, index, audio) {
         return Ok(cached);
     }
 
@@ -334,7 +483,13 @@ async fn generate(
         }
     };
 
-    match tools.segment(&url, index, &plan).await {
+    let began = std::time::Instant::now();
+    let produced = tools.segment(&url, index, &plan).await;
+    // Timed whether it worked or not: a failure that took ninety seconds is
+    // itself the answer to "why did playback stop".
+    state.encoder.record(began.elapsed());
+
+    match produced {
         // ffmpeg can exit happily having produced only a header, which would
         // reach the browser as a valid-looking segment containing no frames.
         Ok(data) if fmp4::first_moof(&data).is_none() => Err(blame(format!(
@@ -342,7 +497,7 @@ async fn generate(
         ))),
         Ok(data) => {
             let data = Arc::new(data);
-            state.cache_segment(&info_hash, file, index, Arc::clone(&data));
+            state.cache_segment(&info_hash, file, index, audio, Arc::clone(&data));
             Ok(data)
         }
         Err(err) => Err(blame(err.to_string())),
@@ -408,9 +563,19 @@ fn mp4_response(body: Vec<u8>) -> Response {
 }
 
 /// A sidecar subtitle file from the torrent, as WebVTT.
+#[derive(Debug, Deserialize)]
+pub struct SidecarQuery {
+    /// Which file in the torrent these subtitles belong to.
+    ///
+    /// Optional so an old bookmark still works, and when it is missing the
+    /// track is served exactly as it was written, with no attempt to align it.
+    pub video: Option<usize>,
+}
+
 pub async fn sidecar(
     State(state): State<Arc<AppState>>,
     Path((hash, file)): Path<(String, usize)>,
+    Query(query): Query<SidecarQuery>,
 ) -> Result<Response, ApiError> {
     let info_hash = parse(&hash)?;
     let torrent = torrent(&state, &info_hash)?;
@@ -446,12 +611,109 @@ pub async fn sidecar(
         .map_err(|err| ApiError::server(err.to_string()))?;
 
     let text = subtitles::decode(&bytes);
-    let vtt = if entry.path.to_ascii_lowercase().ends_with(".vtt") {
-        text
-    } else {
-        subtitles::srt_to_vtt(&text)
+    let cues = subtitles::parse_cues(&text);
+
+    /* A subtitle file that came in the same torrent is not thereby in step with
+     * the video. Releases get rebuilt, leaders differ, and PAL transfers run
+     * 4.3% fast, so a track that is perfect at the opening titles can be four
+     * minutes out by the end. The old behaviour was to trust it completely. */
+    let Some(video) = query.video else {
+        return Ok(vtt_response(subtitles::cues_to_vtt(&cues)));
     };
-    Ok(vtt_response(vtt))
+    match align_sidecar(&state, &info_hash, video, file, &cues).await {
+        Some(alignment) if alignment.is_worth_applying() => {
+            let moved = subsync::apply(&cues, alignment);
+            tracing::info!(
+                subtitle = entry.path,
+                offset_ms = alignment.offset_ms,
+                scale = alignment.scale,
+                confidence = alignment.confidence,
+                "subtitles moved into step with the speech"
+            );
+            Ok(vtt_response(subtitles::cues_to_vtt_noted(
+                &moved,
+                Some(&note(&alignment)),
+            )))
+        }
+        // Either it was already right, or we could not tell. Both mean the
+        // file is served as its author wrote it.
+        _ => Ok(vtt_response(subtitles::cues_to_vtt(&cues))),
+    }
+}
+
+/// Subtitles nobody put in the torrent.
+///
+/// Separate from [`sidecar`] because this is the call that spends the daily
+/// OpenSubtitles allowance, and because it is the one that can honestly fail:
+/// there may be nothing out there for what you are watching.
+pub async fn fetched(
+    State(state): State<Arc<AppState>>,
+    Path((hash, file)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    let info_hash = parse(&hash)?;
+    let torrent = torrent(&state, &info_hash)?;
+    torrent.touch();
+
+    match crate::fetched::fetch(&state, &info_hash, file).await {
+        Ok(vtt) => Ok(vtt_response(vtt)),
+        Err(err) => Err(ApiError::not_found(format!(
+            "could not get subtitles for this: {err}"
+        ))),
+    }
+}
+
+/// What was done to the timings, for anyone who goes looking.
+fn note(alignment: &subsync::Alignment) -> String {
+    format!(
+        "balerion moved these by {}ms at {:.4}x (confidence {:.2})",
+        alignment.offset_ms, alignment.scale, alignment.confidence
+    )
+}
+
+/// Work out where a sidecar track belongs, remembering the answer.
+///
+/// Returns `None` when there is nothing to compare against, when ffmpeg is
+/// absent, or when the comparison was not convincing. All three mean the same
+/// thing to the caller and are worth distinguishing only in the log.
+async fn align_sidecar(
+    state: &Arc<AppState>,
+    info_hash: &balerion_bt::InfoHash,
+    video: usize,
+    subtitle: usize,
+    cues: &[subtitles::Cue],
+) -> Option<subsync::Alignment> {
+    if cues.is_empty() {
+        return None;
+    }
+    if let Some(remembered) = state.cached_alignment(info_hash, video, subtitle) {
+        return remembered;
+    }
+
+    let tools = state.tools.clone()?;
+    let probe = state.probe(&tools, info_hash, video).await.ok()?;
+    let url = state.stream_url(&info_hash.to_hex(), video);
+
+    let found = match subsync::align_to_audio(&tools, &url, cues, probe.duration).await {
+        Ok(alignment) if alignment.is_trustworthy() => Some(alignment),
+        Ok(alignment) => {
+            // Said out loud rather than silently ignored: "we looked and we are
+            // not sure" is a different thing from "we did not look", and only
+            // one of them is worth investigating.
+            tracing::info!(
+                confidence = alignment.confidence,
+                offset_ms = alignment.offset_ms,
+                "not confident enough about these subtitles to move them"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::debug!(%err, "could not align these subtitles");
+            None
+        }
+    };
+
+    state.remember_alignment(info_hash, video, subtitle, found);
+    found
 }
 
 /// A subtitle stream embedded in the video, extracted as WebVTT.

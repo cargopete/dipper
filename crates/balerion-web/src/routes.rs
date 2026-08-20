@@ -153,6 +153,9 @@ pub async fn resolve(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ResolveRequest>,
 ) -> Result<Json<TorrentInfo>, ApiError> {
+    // The clock starts when the viewer asks, not when the download does: the
+    // wait they actually experience includes everything before the first byte.
+    let clock = Arc::new(crate::state::Clock::started(std::time::Instant::now()));
     let input = torrent::parse_input(&request.magnet, &state.ia).await?;
 
     // Already going? Hand back what we have rather than starting a second copy
@@ -162,14 +165,54 @@ pub async fn resolve(
         return Ok(Json(describe(&existing.meta, existing.is_kept())));
     }
 
-    let (meta, peers) = torrent::resolve(&input, &state.config).await?;
-    let root = state.root_for(&meta.info_hash);
+    let root = state.root_for(&input.magnet().info_hash);
+
+    /* Watched before? Then the file list is already sitting beside the data and
+     * there is no reason to ask the swarm for something we know. This is the
+     * expensive half of resolving a magnet: discovery is seconds, but BEP 9 is
+     * thirty of them when it works and a minute and a half when the swarm has
+     * seeders that will send data and none that will answer a metadata
+     * request. */
+    let input = match crate::library::recall(&root).await {
+        Some(mut meta) if meta.info_hash == input.magnet().info_hash => {
+            meta.apply_magnet(&input.magnet());
+            tracing::debug!(
+                name = meta.name,
+                "file list read from disk rather than the swarm"
+            );
+            torrent::Input::Complete(Box::new(meta))
+        }
+        _ => input,
+    };
+
+    // And if the whole thing is already here, it needs no peers whatsoever.
+    // Skipping discovery is the difference between opening instantly and
+    // waiting out a tracker timeout for a film that is entirely on disk.
+    let (meta, peers) = match &input {
+        torrent::Input::Complete(meta)
+            if crate::library::is_complete_on_disk(&root, meta).await =>
+        {
+            ((**meta).clone(), Vec::new())
+        }
+        _ => torrent::resolve(&input, &state.config).await?,
+    };
+
+    clock.resolved();
+
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|err| ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
     let kept = crate::state::is_marked_kept(&root);
-    let started = torrent::start(meta, peers, &root, &state.config).await?;
+    let started = torrent::start(
+        meta,
+        peers,
+        &root,
+        &state.config,
+        state.inbound.clone(),
+        clock,
+    )
+    .await?;
     started.set_kept(kept);
     if kept {
         // Resuming something already marked for keeping: fetch the lot.
@@ -182,6 +225,95 @@ pub async fn resolve(
     let info = describe(&started.meta, kept);
     state.insert(started.meta.info_hash, started);
     Ok(Json(info))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProgressRequest {
+    /// Seconds into the file.
+    pub seconds: f64,
+    /// How long the player says the file is. Taken from the browser rather
+    /// than from ffprobe because for a direct-played file nothing on this side
+    /// has ever measured it.
+    pub duration: f64,
+}
+
+/// Record where a viewer has got to.
+///
+/// Called every few seconds while something is playing, so it does as little as
+/// possible: the write to disk is batched by a task that runs every ten
+/// seconds, and losing the last few of those costs nobody anything.
+pub async fn progress(
+    State(state): State<Arc<AppState>>,
+    Path((hash, file)): Path<(String, usize)>,
+    Json(request): Json<ProgressRequest>,
+) -> Result<StatusCode, ApiError> {
+    let info_hash = InfoHash::parse(&hash).map_err(|_| not_found("that is not an infohash"))?;
+    let torrent = state
+        .get(&info_hash)
+        .ok_or_else(|| not_found("no such torrent"))?;
+
+    // The file's own name, not the torrent's: a season pack is one torrent and
+    // twelve different things to be part way through.
+    let name = torrent
+        .meta
+        .files
+        .get(file)
+        .map(|entry| {
+            entry
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.path)
+                .to_string()
+        })
+        .unwrap_or_else(|| torrent.meta.name.clone());
+
+    state
+        .history
+        .record(&hash, file, &name, request.seconds, request.duration);
+    torrent.touch();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One thing a viewer is part way through.
+#[derive(Debug, Serialize)]
+pub struct Continuing {
+    pub infohash: String,
+    pub file: usize,
+    pub name: String,
+    pub seconds: f64,
+    pub duration: f64,
+    /// How far through, from 0 to 1, so a page can draw a bar without dividing.
+    pub fraction: f64,
+    /// Whether the torrent is still on this machine. Something swept a week ago
+    /// can still be offered, it simply has to be fetched again first.
+    pub held: bool,
+}
+
+/// What to offer picking up again.
+pub async fn continuing(State(state): State<Arc<AppState>>) -> Json<Vec<Continuing>> {
+    let found = state
+        .history
+        .continuing(24)
+        .into_iter()
+        .filter_map(|(key, position)| {
+            let (hash, file) = key.split_once('/')?;
+            let file: usize = file.parse().ok()?;
+            let held = InfoHash::parse(hash)
+                .ok()
+                .is_some_and(|hash| state.get(&hash).is_some());
+            Some(Continuing {
+                infohash: hash.to_string(),
+                file,
+                name: position.name.clone(),
+                seconds: position.seconds,
+                duration: position.duration,
+                fraction: position.fraction(),
+                held,
+            })
+        })
+        .collect();
+    Json(found)
 }
 
 /// Where a television should be pointed, when casting is switched on.
@@ -224,6 +356,11 @@ pub struct Stats {
     pub complete: bool,
     pub kept: bool,
     pub playing: Option<usize>,
+    /// How long each stage of getting this playing took, in milliseconds.
+    pub timings: crate::state::Timeline,
+    /// How the transcoder is coping. Process-wide rather than per torrent,
+    /// because the encoders share one machine.
+    pub encoder: crate::state::EncoderStats,
     /// Run lengths of the piece bitmap, starting with a run of missing pieces.
     ///
     /// A run-length encoding rather than a bit per piece: this is polled once
@@ -251,7 +388,7 @@ fn runs(have: &Bitfield) -> Vec<usize> {
     runs
 }
 
-fn stats_for(hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats {
+fn stats_for(state: &AppState, hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats {
     let snapshot = torrent.handle.stats();
     let have = torrent.handle.have();
     Stats {
@@ -268,6 +405,8 @@ fn stats_for(hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats {
         complete: snapshot.is_complete(),
         kept: torrent.is_kept(),
         playing: *torrent.playing.lock().expect("playing lock"),
+        timings: torrent.clock.snapshot(),
+        encoder: state.encoder.stats(),
         runs: runs(&have),
     }
 }
@@ -280,7 +419,7 @@ pub async fn stats(
     let torrent = state
         .get(&hash)
         .ok_or_else(|| not_found("no such torrent"))?;
-    Ok(Json(stats_for(&hash, &torrent)))
+    Ok(Json(stats_for(&state, &hash, &torrent)))
 }
 
 /// Everything the server currently has on disk or in flight.
@@ -288,7 +427,7 @@ pub async fn list(State(state): State<Arc<AppState>>) -> Json<Vec<Stats>> {
     let mut all: Vec<Stats> = state
         .all()
         .iter()
-        .map(|(hash, torrent)| stats_for(hash, torrent))
+        .map(|(hash, torrent)| stats_for(&state, hash, torrent))
         .collect();
     all.sort_by(|a, b| a.name.cmp(&b.name));
     Json(all)
@@ -326,7 +465,7 @@ pub async fn keep(
             .await;
     }
     torrent.touch();
-    Ok(Json(stats_for(&hash, &torrent)))
+    Ok(Json(stats_for(&state, &hash, &torrent)))
 }
 
 /// Stop a torrent and delete its data.
@@ -408,6 +547,22 @@ pub async fn script() -> impl IntoResponse {
             (NO_CACHE.0, NO_CACHE.1),
         ],
         include_str!("../assets/app.js"),
+    )
+}
+
+/// The page's arithmetic, kept apart so it can be tested without a browser.
+///
+/// Loaded before `app.js`, which reads its functions off the window. A separate
+/// file rather than a concatenation because `node --test` has to be able to
+/// require it, and because a file with tests beside it is a file people keep
+/// tested.
+pub async fn library_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (NO_CACHE.0, NO_CACHE.1),
+        ],
+        include_str!("../assets/lib.js"),
     )
 }
 

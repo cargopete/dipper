@@ -246,9 +246,17 @@ enum Command {
         #[arg(long, value_name = "PORT")]
         cast_port: Option<u16>,
 
-        /// The port we tell peers and trackers we listen on.
+        /// The port we tell peers and trackers we listen on, and now also
+        /// listen on.
         #[arg(long, default_value_t = 6881)]
         peer_port: u16,
+
+        /// Required of requests that did not come from this machine.
+        ///
+        /// Only consulted with `--host`, since loopback needs no gate. One is
+        /// generated and printed if you bind wide without choosing your own.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
 
         /// Do not use the DHT. Trackers and webseeds only.
         #[arg(long)]
@@ -284,6 +292,14 @@ struct EngineArgs {
     #[arg(long)]
     no_webseeds: bool,
 
+    /// Do not retry an obfuscated handshake when plaintext is refused.
+    ///
+    /// Costs one extra dial to every address that accepts a socket and hangs
+    /// up, which on a public swarm is many of them. Gains the peers that will
+    /// not speak plaintext at all.
+    #[arg(long)]
+    no_encryption: bool,
+
     /// The port we tell peers and trackers we listen on.
     #[arg(long, default_value_t = 6881)]
     port: u16,
@@ -310,6 +326,7 @@ impl From<&EngineArgs> for EngineOptions {
         Self {
             no_dht: args.no_dht,
             no_webseeds: args.no_webseeds,
+            use_encryption: !args.no_encryption,
             port: args.port,
             max_peers: args.max_peers,
             dht_budget: Duration::from_secs(args.dht_seconds),
@@ -508,7 +525,9 @@ async fn run(cli: Cli) -> Result<()> {
                 *limit,
                 choice,
                 output.clone(),
-                &engine.into(),
+                // Listening before we announce, so the port we tell trackers
+                // about is one somebody can actually reach us on.
+                &EngineOptions::from(engine).listen().await,
             )
             .await
         }
@@ -524,7 +543,12 @@ async fn run(cli: Cli) -> Result<()> {
             engine,
         } => {
             let source = torrent_source::resolve(target, &client(&cli)?).await?;
-            download::download_command(&source, output.clone(), &engine.into()).await
+            download::download_command(
+                &source,
+                output.clone(),
+                &EngineOptions::from(engine).listen().await,
+            )
+            .await
         }
 
         Command::Relay {
@@ -568,6 +592,7 @@ async fn run(cli: Cli) -> Result<()> {
             no_webseeds,
             max_peers,
             dht_seconds,
+            token,
         } => {
             let mut config = balerion_web::ServeConfig {
                 host: *host,
@@ -580,6 +605,7 @@ async fn run(cli: Cli) -> Result<()> {
                 use_dht: !*no_dht,
                 use_webseeds: !*no_webseeds,
                 peer_port: *peer_port,
+                access_token: token.clone(),
                 dht_budget: Duration::from_secs(*dht_seconds),
                 ..Default::default()
             };

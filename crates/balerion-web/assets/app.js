@@ -40,6 +40,10 @@ const el = {
   backToResults: $("back-to-results"),
   viewer: $("viewer"),
   video: $("video"),
+  audioRow: $("audio-row"),
+  audioTracks: $("audio-tracks"),
+  continuing: $("continuing"),
+  continuingList: $("continuing-list"),
   viewerNote: $("viewer-note"),
   files: $("file-list"),
   map: $("piecemap"),
@@ -64,27 +68,17 @@ let poller = null;
 let filters = [];     // the subsets offered by the selected index
 let lastStats = null; // the most recent poll, for the feasibility advisory
 let playInfo = null;  // what /api/play said about the file being played
+let chosenAudio = 0;  // which audio track the viewer picked, when they did
 
-/* ---- formatting -------------------------------------------------------- */
+const audioQuery = () => (chosenAudio ? `?audio=${chosenAudio}` : "");
 
-const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-function bytes(n) {
-  if (!n) return "0 B";
-  let size = n;
-  let unit = 0;
-  while (size >= 1024 && unit < UNITS.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size < 10 && unit > 0 ? size.toFixed(1) : Math.round(size)} ${UNITS[unit]}`;
-}
-
-function seconds(n) {
-  if (!isFinite(n) || n <= 0) return "0 s";
-  if (n < 90) return `${Math.round(n)} s`;
-  return `${Math.floor(n / 60)}m ${Math.round(n % 60)}s`;
-}
+/* ---- formatting ---------------------------------------------------------
+ *
+ * These live in lib.js, which is loaded first and has tests of its own. They
+ * are the parts of this file that are only arithmetic, and they were the parts
+ * with no way to run them outside a browser. */
+const { bytes, seconds, roughly, episodeTagOf, feasible, shouldChangeVerdict } =
+  window.BalerionLib;
 
 function show(node, visible) {
   node.hidden = !visible;
@@ -283,7 +277,7 @@ async function pump() {
   const index = session.next;
   let waiting = false;
   try {
-    const response = await fetch(`${info.segment_prefix}${index}`);
+    const response = await fetch(`${info.segment_prefix}${index}${info.segment_suffix ?? ""}`);
 
     // 503 means the bytes have not arrived yet, not that anything is wrong.
     // Giving up here is what turns a slow torrent into a dead player, so we
@@ -401,15 +395,6 @@ function feasibility() {
 }
 
 /** Rounded so a jittering estimate does not twitch every second. */
-function roughly(secs) {
-  if (!isFinite(secs)) return "a very long time";
-  if (secs < 90) return "under a minute";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `about ${Math.max(1, Math.round(mins / 5) * 5)} minutes`;
-  const hours = secs / 3600;
-  return hours < 1.5 ? "about an hour" : `about ${Math.round(hours)} hours`;
-}
-
 function showAdvisory() {
   const verdict = feasibility();
   if (!verdict || verdict.ok) {
@@ -552,6 +537,9 @@ async function play(index) {
   if (!file) return;
 
   teardown();
+  // A different file has different tracks, so a choice made about the last one
+  // means nothing here.
+  if (playing !== index) chosenAudio = 0;
   playing = index;
   playInfo = null;
   forgetRates();
@@ -583,7 +571,7 @@ async function play(index) {
 
   let info;
   try {
-    info = await api(`/api/play/${current.infohash}/${index}`);
+    info = await api(`/api/play/${current.infohash}/${index}${audioQuery()}`);
   } catch (err) {
     doneWaiting();
     showViewerNote(err.message);
@@ -594,7 +582,18 @@ async function play(index) {
 
   playInfo = info;
   attachTracks(info.tracks);
+  showAudioTracks(info.audio_tracks);
   showCastUrl();
+
+  /* Subtitles being made from the audio take minutes, so the page has to be
+   * able to say "not yet" rather than leaving a viewer to conclude there are
+   * none. Asked again on a timer, since nothing pushes. */
+  if (info.subtitles_pending) {
+    setStatus("Transcribing the audio for subtitles. This takes a few minutes.");
+    window.setTimeout(() => {
+      if (playing === index) refreshTracks(index);
+    }, 30_000);
+  }
 
   if (info.mode === "unsupported") {
     showViewerNote(info.reason, info.download);
@@ -620,8 +619,9 @@ async function play(index) {
     show(el.video, true);
     show(el.viewerNote, false);
     show(el.pending, false);
-    el.video.src = info.url;
+    el.video.src = reachableUrl(info.url);
     el.video.load();
+    resumeIfAsked(info);
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
     });
@@ -635,8 +635,9 @@ async function play(index) {
     show(el.video, true);
     show(el.viewerNote, false);
     show(el.pending, false);
-    el.video.src = info.playlist;
+    el.video.src = reachableUrl(info.playlist);
     el.video.load();
+    resumeIfAsked(info);
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
     });
@@ -644,6 +645,184 @@ async function play(index) {
   }
 
   await startTranscode(info);
+  resumeIfAsked(info);
+}
+
+/* ---- one episode after another ------------------------------------------
+ *
+ * A season pack is one torrent and twelve programmes, and having to go back to
+ * the file list between each of them is the sort of thing that makes an
+ * evening feel like operating software. The next one is the next *episode*,
+ * not the next entry in the torrent: packs are frequently listed in whatever
+ * order they were added.
+ *
+ * Cancellable, and cancelled by anything that suggests the viewer is still
+ * there. Nobody has ever wanted a television to start the next thing while
+ * they were reaching for the remote. */
+const NEXT_EPISODE_DELAY_MS = 12_000;
+let nextEpisodeTimer = null;
+
+function playableInOrder() {
+  if (!current) return [];
+  return [...current.files]
+    .filter((file) => file.kind === "video")
+    .sort((a, b) => {
+      const ae = a.season !== null && a.episode !== null;
+      const be = b.season !== null && b.episode !== null;
+      if (ae && be) return a.season - b.season || a.episode - b.episode;
+      if (ae) return -1;
+      if (be) return 1;
+      return a.index - b.index;
+    });
+}
+
+function cancelNextEpisode() {
+  if (nextEpisodeTimer === null) return;
+  window.clearTimeout(nextEpisodeTimer);
+  nextEpisodeTimer = null;
+  setStatus("");
+}
+
+function offerNextEpisode() {
+  cancelNextEpisode();
+  const ordered = playableInOrder();
+  const at = ordered.findIndex((file) => file.index === playing);
+  const next = at === -1 ? null : ordered[at + 1];
+  if (!next) return;
+
+  const label =
+    next.season !== null && next.episode !== null
+      ? `S${String(next.season).padStart(2, "0")}E${String(next.episode).padStart(2, "0")}`
+      : next.name;
+  setStatus(`Next: ${label}. Starting in ${NEXT_EPISODE_DELAY_MS / 1000} seconds; press anything to stop.`);
+
+  nextEpisodeTimer = window.setTimeout(() => {
+    nextEpisodeTimer = null;
+    play(next.index);
+  }, NEXT_EPISODE_DELAY_MS);
+}
+
+el.video.addEventListener("ended", () => offerNextEpisode());
+// Any sign of a viewer still being there calls it off.
+for (const event of ["play", "seeking", "keydown", "pointerdown"]) {
+  (event === "keydown" || event === "pointerdown" ? document : el.video).addEventListener(
+    event,
+    () => cancelNextEpisode()
+  );
+}
+
+/* ---- picking up where you left off -------------------------------------
+ *
+ * The server remembers a position per file. Seeking has to wait for metadata:
+ * setting currentTime on an element that does not yet know its own duration is
+ * silently ignored, which looks exactly like the feature not working. */
+function resumeIfAsked(info) {
+  const at = Number(info.resume_at);
+  if (!Number.isFinite(at) || at <= 0) return;
+
+  const seek = () => {
+    // Guarded, because the viewer may have moved on or started scrubbing
+    // themselves in the moment before metadata arrived.
+    if (el.video.currentTime < 1) el.video.currentTime = at;
+    setStatus(`Picking up at ${seconds(at)}.`);
+  };
+  if (el.video.readyState >= 1) seek();
+  else el.video.addEventListener("loadedmetadata", seek, { once: true });
+}
+
+/* Tell the server where we are, every so often.
+ *
+ * Every ten seconds rather than on every timeupdate, which fires four times a
+ * second and would be four hundred requests for a feature film. The server
+ * batches these to disk anyway, so a finer report would buy nothing. */
+const PROGRESS_EVERY_MS = 10_000;
+let lastProgressAt = 0;
+
+function reportProgress(force) {
+  if (!current || playing === null) return;
+  const now = Date.now();
+  if (!force && now - lastProgressAt < PROGRESS_EVERY_MS) return;
+
+  const seconds = el.video.currentTime;
+  const duration = el.video.duration;
+  if (!Number.isFinite(seconds) || !Number.isFinite(duration) || duration <= 0) return;
+  lastProgressAt = now;
+
+  // Deliberately unawaited and deliberately silent: losing one of these costs
+  // ten seconds of accuracy and is not worth interrupting playback over.
+  api(`/api/progress/${current.infohash}/${playing}`, json({ seconds, duration })).catch(
+    () => {}
+  );
+}
+
+el.video.addEventListener("timeupdate", () => reportProgress(false));
+el.video.addEventListener("pause", () => reportProgress(true));
+el.video.addEventListener("ended", () => reportProgress(true));
+// The last position of a session is the one most worth keeping, and a closing
+// tab gets no second chance to send it.
+window.addEventListener("pagehide", () => reportProgress(true));
+
+/* ---- audio tracks -------------------------------------------------------
+ *
+ * A film with a commentary or a second language has more than one, and taking
+ * whichever the muxer put first is how somebody ends up listening to a director
+ * talk over the picture with no way to stop it. Only shown when there is a
+ * genuine choice: a menu of one is a menu that should not be there. */
+function showAudioTracks(tracks) {
+  el.audioTracks.replaceChildren();
+  const choices = Array.isArray(tracks) ? tracks : [];
+  show(el.audioRow, choices.length > 1);
+  if (choices.length < 2) return;
+
+  for (const track of choices) {
+    const option = document.createElement("option");
+    option.value = String(track.index);
+    option.textContent = track.channels
+      ? `${track.label} \u2014 ${track.channels}ch`
+      : track.label;
+    el.audioTracks.append(option);
+  }
+  el.audioTracks.value = String(playInfo?.audio ?? choices[0].index);
+}
+
+/* Switching track means starting the file again: the declared codec string
+ * changes with the audio, so the MediaSource has to be rebuilt from its init
+ * segment. The position is kept, because losing your place to change language
+ * would be a poor trade. */
+el.audioTracks.addEventListener("change", async () => {
+  if (playing === null) return;
+  const at = el.video.currentTime;
+  chosenAudio = Number(el.audioTracks.value) || 0;
+  await play(playing);
+  if (Number.isFinite(at) && at > 0) {
+    const seek = () => {
+      el.video.currentTime = at;
+    };
+    if (el.video.readyState >= 1) seek();
+    else el.video.addEventListener("loadedmetadata", seek, { once: true });
+  }
+});
+
+/* Re-ask about a file without disturbing what is playing.
+ *
+ * Used while subtitles are being transcribed: the track appears when the job
+ * finishes, and nothing else about the file has changed. */
+async function refreshTracks(index) {
+  try {
+    const info = await api(`/api/play/${current.infohash}/${index}${audioQuery()}`);
+    if (playing !== index) return;
+    attachTracks(info.tracks);
+    if (info.subtitles_pending) {
+      window.setTimeout(() => {
+        if (playing === index) refreshTracks(index);
+      }, 30_000);
+    } else if (info.tracks?.length) {
+      setStatus("Subtitles are ready.");
+    }
+  } catch {
+    // The file is still playing; a failed poll for subtitles is not worth
+    // saying anything about.
+  }
 }
 
 /* A container the browser opens can still hold a codec it will not decode,
@@ -674,6 +853,22 @@ el.video.addEventListener("seeking", () => reseek());
  * the server is asked for one the network can reach. Transcoded files get the
  * playlist; anything a television could already open gets the file itself. */
 let castBase = null;
+
+/* Where the media should be fetched from, so that a television can fetch it too.
+ *
+ * AirPlay does not mirror a video element, it hands the receiver the URL and
+ * lets it fetch the media itself. An Apple TV given `http://127.0.0.1:8080/...`
+ * reaches nothing, so the button appeared to do nothing and the whole feature
+ * was a URL to copy by hand.
+ *
+ * With `--cast-port` on there is an address the network can reach, serving
+ * exactly the same bytes, so playback is pointed at that instead. The browser
+ * fetching from its own machine's LAN address costs nothing and it is the only
+ * way the receiver ever sees a URL that works. */
+function reachableUrl(path) {
+  if (!castBase || !path || path.startsWith("http")) return path;
+  return `${castBase}${path}`;
+}
 
 async function loadCastBase() {
   try {
@@ -855,15 +1050,6 @@ function renderStats(stats) {
 }
 
 /** `S01E02` out of a torrent name, the same shapes the server reads. */
-function episodeTagOf(name) {
-  const m =
-    /(?:^|[^a-z0-9])s(\d{1,2})[^a-z0-9]?e(\d{1,3})(?![0-9])/i.exec(name) ||
-    /(?:^|[^a-z0-9])(\d{1,2})x(\d{1,3})(?![0-9])/i.exec(name);
-  if (!m) return null;
-  const pad = (n) => String(Number(n)).padStart(2, "0");
-  return `S${pad(m[1])}E${pad(m[2])}`;
-}
-
 /* Three copies of the same episode do not download three times faster. They
  * split the peers you have between them, and each one is slower than one would
  * have been. That is easy to do by accident, invisible while it happens, and
@@ -948,6 +1134,61 @@ function renderLibrary(all) {
   }
 }
 
+/* ---- carry on watching --------------------------------------------------
+ *
+ * On most evenings this is the answer to "what shall we watch", so it is drawn
+ * above the search rather than below the library. Things watched to the end are
+ * not here: the row is for what you are part way through. */
+async function renderContinuing() {
+  let items;
+  try {
+    items = await api("/api/continue");
+  } catch {
+    return;
+  }
+
+  show(el.continuing, items.length > 0);
+  el.continuingList.replaceChildren();
+
+  for (const item of items) {
+    const row = document.createElement("li");
+
+    const title = document.createElement("div");
+    title.className = "result-title";
+    title.textContent = item.name;
+
+    const left = Math.max(item.duration - item.seconds, 0);
+    const meta = document.createElement("span");
+    meta.className = "result-meta";
+    meta.textContent = item.held
+      ? `${seconds(left)} left`
+      : `${seconds(left)} left  /  not on this machine any more`;
+    title.append(meta);
+
+    // A bar rather than a percentage: it is read at a glance from a sofa.
+    const bar = document.createElement("div");
+    bar.className = "progress";
+    const filled = document.createElement("span");
+    filled.style.width = `${Math.round(item.fraction * 100)}%`;
+    bar.append(filled);
+
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "button-small";
+    // Honest about what the button will do. Something swept last week has to
+    // be fetched again before it can be resumed, and that takes as long as it
+    // took the first time.
+    action.textContent = item.held ? "Carry on" : "Fetch again";
+    action.addEventListener("click", async () => {
+      await openTorrent(item.infohash);
+      if (current && current.infohash === item.infohash) play(item.file);
+    });
+
+    row.append(title, bar, action);
+    el.continuingList.append(row);
+  }
+}
+
 /* ---- polling ----------------------------------------------------------- */
 
 async function refresh() {
@@ -963,6 +1204,13 @@ async function refresh() {
     // a second away.
     console.debug("poll failed", err);
   }
+}
+
+/* The continue row changes on the scale of an evening, not a second, so it is
+ * drawn on the way in and after anything that could have changed it rather
+ * than on the one-second poll. */
+async function refreshContinuing() {
+  await renderContinuing();
 }
 
 function startPolling() {
@@ -989,6 +1237,7 @@ function startPolling() {
 
 const SOURCES = {
   ia: {
+    label: "Internet Archive",
     /* What this index calls its subsets. */
     filterLabel: "Collection",
     catalogue: "/api/shelves",
@@ -1024,6 +1273,7 @@ const SOURCES = {
   },
 
   tpb: {
+    label: "apibay",
     filterLabel: "Category",
     catalogue: "/api/tpb/categories",
     options: (payload) => payload.categories,
@@ -1081,6 +1331,57 @@ const SOURCES = {
   },
 };
 
+/* Anything the server can ask that is not one of the two written out above:
+ * a Torznab indexer, or all of them at once. Built at startup from
+ * `/api/sources`, because which indexers exist is the server's business and
+ * not something this page can know.
+ *
+ * They all go through `/api/find`, which is the seam: one result shape, one
+ * endpoint, several indexes asked at once and their answers merged. */
+function findEntry({ key, label, note, keys }) {
+  return {
+    label,
+    // No subsets. A Torznab indexer has categories, but which ones depends on
+    // what is behind it, and offering the wrong list is worse than none.
+    filterLabel: null,
+    catalogue: null,
+    options: () => [],
+    note: () => note,
+    allowsEmpty: false,
+    thinCap: () => null,
+    query: (terms) =>
+      `/api/find?${new URLSearchParams({
+        q: terms,
+        sources: keys.join(","),
+        limit: "30",
+      })}`,
+    excluded: () => [],
+    count: (data) => {
+      if (!data.hits.length && !data.failed.length) return "nothing to show";
+      const parts = [`showing ${data.hits.length}`];
+      if (data.duplicates) parts.push(`${data.duplicates} the same release twice`);
+      // An index that did not answer must be said out loud: a short list is
+      // otherwise indistinguishable from a thorough search that found little.
+      if (data.failed.length) parts.push(`${data.failed.join(", ")} did not answer`);
+      return parts.join(", ");
+    },
+    empty: () => "Nothing came back for that. Try fewer words, or another index.",
+    row: (hit) => ({
+      title: hit.title,
+      // Which index found it, first: with several configured that is most of
+      // what makes a mixed list legible.
+      meta: [hit.sources.join(" + "), hit.detail],
+      size: hit.size,
+      // No leechers: `/api/find` reports a seeder count because that is the
+      // only figure every index agrees to give, and inventing a zero for the
+      // rest would make a healthy swarm look dead.
+      swarm: hit.seeders === undefined ? null : { seeders: hit.seeders, leechers: null },
+      open: hit.open,
+    }),
+    key,
+  };
+}
+
 const source = () => SOURCES[el.source.value] || SOURCES.ia;
 
 function setMode(mode) {
@@ -1090,6 +1391,55 @@ function setMode(mode) {
   }
   show(el.searchForm, mode === "search");
   show(el.form, mode === "link");
+}
+
+/* Ask the server which indexes it can reach, and add the ones this page does
+ * not know about by name.
+ *
+ * The two written out above are always there. Torznab indexers are whatever
+ * somebody configured, so they arrive at runtime, and an "everything" entry is
+ * added once there is more than one thing to ask. */
+async function loadIndexes() {
+  let available;
+  try {
+    available = await api("/api/sources");
+  } catch {
+    // The two built in still work. A missing list of extras is not worth
+    // saying anything about.
+    return;
+  }
+
+  const extra = available.filter((entry) => entry.key.startsWith("torznab:"));
+  for (const entry of extra) {
+    SOURCES[entry.key] = findEntry({
+      key: entry.key,
+      label: entry.label,
+      note: entry.note,
+      keys: [entry.key],
+    });
+  }
+
+  if (available.length > 1) {
+    SOURCES.all = findEntry({
+      key: "all",
+      label: "Every index",
+      note:
+        "Asks all of them at once and folds results that are the same torrent " +
+        "into one row. The cautions above apply to whichever index a row came from.",
+      keys: available.map((entry) => entry.key),
+    });
+  }
+
+  // Rebuild the menu, keeping whatever was selected.
+  const selected = el.source.value;
+  el.source.replaceChildren();
+  for (const [key, entry] of Object.entries(SOURCES)) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = entry.label || key;
+    el.source.append(option);
+  }
+  el.source.value = SOURCES[selected] ? selected : "ia";
 }
 
 /* Fetch the subsets the selected index offers, and fill the menu.
@@ -1102,6 +1452,20 @@ let loading = 0;
 async function loadFilters() {
   const ticket = ++loading;
   const chosen = source();
+
+  // A source with no subsets hides the menu rather than showing an empty one.
+  if (!chosen.catalogue) {
+    filters = [];
+    el.filter.replaceChildren();
+    show(el.filter.closest(".field") || el.filter, false);
+    show(el.thinRow, false);
+    el.filterNote.textContent = "";
+    const note = chosen.note();
+    el.sourceNote.textContent = note || "";
+    show(el.sourceNote, Boolean(note));
+    return;
+  }
+  show(el.filter.closest(".field") || el.filter, true);
 
   let payload;
   try {
@@ -1192,8 +1556,16 @@ function renderResults(data) {
        * playhead, and the viewer may as well know that before clicking. */
       seeders.className = view.swarm.seeders < 10 ? "result-seeders-thin" : "result-seeders";
       seeders.textContent = `${view.swarm.seeders}`;
-      swarm.append(seeders, ` / ${view.swarm.leechers}`);
-      swarm.title = `${view.swarm.seeders} seeding, ${view.swarm.leechers} leeching`;
+      swarm.append(seeders);
+      /* Only shown when the index actually said. Printing "/ 0" for an index
+       * that reports seeders and nothing else claims a fact nobody has, and a
+       * swarm with no leechers looks like a dead one. */
+      if (view.swarm.leechers !== null && view.swarm.leechers !== undefined) {
+        swarm.append(` / ${view.swarm.leechers}`);
+        swarm.title = `${view.swarm.seeders} seeding, ${view.swarm.leechers} leeching`;
+      } else {
+        swarm.title = `${view.swarm.seeders} seeding; this index does not report leechers`;
+      }
     }
 
     const size = document.createElement("span");
@@ -1458,10 +1830,18 @@ function openFromFragment() {
 }
 
 setMode("search");
-loadFilters();
+loadIndexes().then(loadFilters);
 loadCastBase();
 startPolling();
+refreshContinuing();
 openFromFragment();
+
+// After playing something, and when the tab is looked at again, since the
+// position may have moved on another device pointed at the same server.
+el.video.addEventListener("pause", () => refreshContinuing());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshContinuing();
+});
 
 /* A second magnet arriving at an already-open tab.
  *

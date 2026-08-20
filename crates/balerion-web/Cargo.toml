@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 balerion-bt.workspace = true
 balerion-ia.workspace = true
+balerion-osdb.workspace = true
+balerion-torznab.workspace = true
 balerion-tpb.workspace = true
 
 anyhow.workspace = true
@@ -35,6 +37,16 @@ reqwest = { version = "0.13", default-features = false, features = [
     "rustls-native-certs",
 ] }
 directories = "6"
+# Subtitle alignment is a cross-correlation, and doing that directly over a two
+# hour film is billions of multiplications. Through the frequency domain it is a
+# few transforms.
+rustfft = "6"
+# whisper.cpp wants a file on disk, not a pipe, so transcription needs a
+# scratch directory. A runtime dependency rather than a test one for that
+# reason alone.
+tempfile = "3"
+# For the access token. Same version the engine already pulls in.
+rand = "0.10"
 # rust_crypto rather than aws_lc_rs: pure Rust, no C toolchain, which is what
 # keeps this a binary you can drop on a box. Without one of the two features the
 # crate panics at the moment it verifies a signature, which no test that feeds it
@@ -42,6 +54,12 @@ directories = "6"
 jsonwebtoken = { version = "10.3", default-features = false, features = ["rust_crypto"] }
 
 [dev-dependencies]
+# `start_paused` for the supervisor tests, so a five second restart wait costs
+# the suite nothing.
+tokio = { workspace = true, features = ["test-util"] }
+# For driving the router in-process, without a socket, so a request can claim
+# to have come from somewhere other than loopback.
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 sha1 = "0.11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
