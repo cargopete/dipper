@@ -12,7 +12,9 @@ rust-version = "1.85"
 [workspace.dependencies]
 balerion-bt = { path = "crates/balerion-bt", version = "0.1.0" }
 balerion-ia = { path = "crates/balerion-ia", version = "0.1.0" }
+balerion-osdb = { path = "crates/balerion-osdb", version = "0.1.0" }
 balerion-index = { path = "crates/balerion-index", version = "0.1.0" }
+balerion-torznab = { path = "crates/balerion-torznab", version = "0.1.0" }
 balerion-tpb = { path = "crates/balerion-tpb", version = "0.1.0" }
 balerion-web = { path = "crates/balerion-web", version = "0.1.0" }
 

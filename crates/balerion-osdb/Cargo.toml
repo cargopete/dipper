@@ -1,0 +1,24 @@
+[package]
+name = "balerion-osdb"
+description = "OpenSubtitles client: find a subtitle file that matches this exact release"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+tracing.workspace = true
+
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls",
+    "rustls-native-certs",
+] }
+urlencoding = "2"

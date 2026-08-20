@@ -1,0 +1,25 @@
+[package]
+name = "balerion-torznab"
+description = "Torznab client: one protocol, every self-hosted indexer that speaks it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "sync"] }
+tracing.workspace = true
+
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "rustls",
+    "rustls-native-certs",
+] }
+# The wire format is RSS, so there is XML to read whether we like it or not.
+quick-xml = "0.38"
+urlencoding = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
