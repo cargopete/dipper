@@ -1,0 +1,51 @@
+name: nightly
+
+# The offline suite is good and proves nothing about the live internet.
+#
+# balerion's whole job is talking to services that change without telling
+# anybody: archive.org has already moved its scrape API's behaviour under us
+# once, and the way that failure presents is not an error but a silently
+# truncated result set. Nothing in the pull request suite would notice.
+#
+# So this runs the tests that are marked `ignored` precisely because they need
+# the network, on a schedule, against the one source that is stable, legal and
+# webseed-backed. A failure here is information about somebody else's server as
+# often as it is about our code, which is why it does not gate a merge.
+
+on:
+  schedule:
+    # Half past three in the morning UTC, which is a quiet hour on the
+    # Archive's servers and therefore the fairest time to be asking.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  live:
+    name: against the live internet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Single-threaded on purpose. These share one rate limiter per client and
+      # archive.org starts answering 429 at anything much above three requests
+      # a second; running them in parallel would test our backoff rather than
+      # what it is meant to be testing.
+      - name: archive.org
+        run: cargo test -p balerion-ia --locked -- --ignored --test-threads=1
+
+      # Independent of anything we compute: the Archive publishes its own
+      # infohash for each derived torrent, so this checks our bencode scanner
+      # and our SHA-1 path against a third party rather than against ourselves.
+      - name: Report
+        if: always()
+        run: echo "A failure here may be theirs rather than ours. Read the output before changing anything."
