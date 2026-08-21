@@ -111,10 +111,10 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     }
 
     let Some(offered) = offered(&request) else {
-        return refuse();
+        return refuse(&request);
     };
     if !same_secret(&offered, &token) {
-        return refuse();
+        return refuse(&request);
     }
 
     // It was right, so remember it. Otherwise every asset and every poll would
@@ -127,13 +127,77 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     response
 }
 
-fn refuse() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        "This balerion is listening beyond localhost and needs its access token. \
-         It was printed when the server started; open the link it gave you.\n",
+/// The plain refusal, for anything that is not a browser.
+const REFUSAL: &str = "This balerion is listening beyond localhost and needs its access token. \
+     It was printed when the server started; open the link it gave you.\n";
+
+/// The same refusal with a way out of it, for anything that is.
+///
+/// A phone that lands here with the wrong cookie used to get one line of text
+/// on a white page and no route forward, which is indistinguishable from the
+/// player being broken. It is an easy wall to walk into, because the cookie
+/// this gate sets belongs to the host that set it: open the link by IP and then
+/// follow a link that uses the machine's name and you arrive as a stranger, with
+/// the token sitting uselessly against the other spelling of the same machine.
+///
+/// So the refusal now carries the box that fixes it. No script: the guard
+/// already reads the token out of the query, so an ordinary GET form aimed at
+/// `/` is the whole mechanism.
+fn refusal_page() -> String {
+    format!(
+        r#"<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Balerion is locked</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 16px/1.5 system-ui, sans-serif; margin: 0; display: grid;
+         place-items: center; min-height: 100vh; padding: 1.5rem; }}
+  main {{ max-width: 26rem; }}
+  h1 {{ font-size: 1.25rem; margin: 0 0 0.75rem; }}
+  p {{ margin: 0 0 1rem; opacity: 0.8; }}
+  form {{ display: flex; gap: 0.5rem; }}
+  input {{ flex: 1; min-width: 0; padding: 0.6rem; font: inherit;
+           border: 1px solid currentColor; border-radius: 0.4rem;
+           background: transparent; color: inherit; }}
+  button {{ padding: 0.6rem 1rem; font: inherit; border-radius: 0.4rem;
+            border: 1px solid currentColor; background: transparent;
+            color: inherit; }}
+</style>
+<main>
+  <h1>This one needs its token</h1>
+  <p>It is listening beyond this machine, so it asks. The token was printed
+     when the server started. A token you set on another address for this same
+     machine does not count here, which is usually what has happened.</p>
+  <form action="/" method="get">
+    <input name="{TOKEN}" autocomplete="off" autocapitalize="off"
+           spellcheck="false" placeholder="access token" aria-label="access token">
+    <button type="submit">Open</button>
+  </form>
+</main>
+"#
     )
-        .into_response()
+}
+
+/// Whether this client would rather read a page than a sentence.
+fn wants_html(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+fn refuse(request: &Request) -> Response {
+    if wants_html(request) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            refusal_page(),
+        )
+            .into_response();
+    }
+    (StatusCode::UNAUTHORIZED, REFUSAL).into_response()
 }
 
 #[cfg(test)]
@@ -261,6 +325,95 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(cookie.contains("balerion_token=sesame"), "{cookie}");
+    }
+
+    /// Ask as `from`, with headers.
+    async fn ask_with(
+        router: axum::Router,
+        uri: &str,
+        from: &str,
+        headers: &[(&str, &str)],
+    ) -> axum::response::Response {
+        use tower::ServiceExt;
+        let mut request = request_with(uri, headers);
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(from.parse::<SocketAddr>().unwrap()));
+        router.oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_browser_is_refused_with_a_way_out_of_it() {
+        // The dead end this replaces: one line of text on a white page, which
+        // on a phone is indistinguishable from the player being broken.
+        let response = ask_with(
+            guarded(Some("sesame")),
+            "/",
+            "192.0.2.7:1234",
+            &[("accept", "text/html,application/xhtml+xml")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        // The form is the entire mechanism, so it is the thing worth asserting:
+        // a GET to `/` carrying the token under the name the guard reads.
+        assert!(body.contains(r#"<form action="/" method="get">"#), "{body}");
+        assert!(body.contains(&format!(r#"name="{TOKEN}""#)), "{body}");
+        // And it must not hand out what it is asking for.
+        assert!(!body.contains("sesame"), "the page must not leak the token");
+    }
+
+    #[tokio::test]
+    async fn anything_that_is_not_a_browser_still_gets_a_sentence() {
+        // ffmpeg, curl and a <video> element fetching a segment all ask for
+        // `*/*`, and a page of markup would only confuse the logs.
+        let response = ask_with(
+            guarded(Some("sesame")),
+            "/stream/x/0",
+            "192.0.2.7:1234",
+            &[("accept", "*/*")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_form_on_the_refusal_actually_opens_it() {
+        // The round trip the page exists to make: submit the token, arrive.
+        let router = guarded(Some("sesame"));
+        let refused = ask_with(
+            router.clone(),
+            "/x",
+            "192.0.2.7:1234",
+            &[("accept", "text/html")],
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let opened = ask_with(
+            router,
+            "/x?balerion_token=sesame",
+            "192.0.2.7:1234",
+            &[("accept", "text/html")],
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
     }
 
     #[tokio::test]
