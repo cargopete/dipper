@@ -9,6 +9,8 @@ const assert = require("node:assert/strict");
 
 const { bytes, seconds, roughly, episodeTagOf, feasible, shouldChangeVerdict } =
   require("./lib.js");
+const lib = require("./lib.js");
+const { describe, it } = test;
 
 test("byte counts read the way a person would say them", () => {
   assert.equal(bytes(0), "0 B");
@@ -127,4 +129,43 @@ test("a verdict does not flap when the rate hovers at the threshold", () => {
   // Properly changed: say so.
   assert.equal(shouldChangeVerdict(true, false, 0.6), true);
   assert.equal(shouldChangeVerdict(false, true, 1.8), true);
+});
+
+/* The bug this exists to prevent: a phone handed a LAN address it cannot reach,
+   fetching nothing and sitting at 0:00 with no error to show for it. */
+describe("mediaUrl", () => {
+  const CAST = "http://192.168.0.13:8081";
+
+  it("uses the cast address only when the page came from loopback", () => {
+    assert.equal(
+      lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "127.0.0.1"),
+      "http://192.168.0.13:8081/api/play/abc/0/index.m3u8",
+    );
+    assert.equal(lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "localhost"),
+      "http://192.168.0.13:8081/api/play/abc/0/index.m3u8");
+  });
+
+  it("leaves the path alone when the page came from anywhere else", () => {
+    // The tunnel, which is how a phone reaches an always-on machine.
+    assert.equal(
+      lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "pepe-thinkpad.tailb0627.ts.net"),
+      "/api/play/abc/0/index.m3u8",
+    );
+    // And a LAN address, which is reachable but is not necessarily the same
+    // LAN as the cast server's.
+    assert.equal(lib.mediaUrl("/stream/abc/0", CAST, "100.83.44.63"), "/stream/abc/0");
+  });
+
+  it("does not meddle with an address somebody has already decided", () => {
+    assert.equal(
+      lib.mediaUrl("http://elsewhere/x.m3u8", CAST, "127.0.0.1"),
+      "http://elsewhere/x.m3u8",
+    );
+  });
+
+  it("copes with no cast server and with nothing to play", () => {
+    assert.equal(lib.mediaUrl("/stream/abc/0", null, "127.0.0.1"), "/stream/abc/0");
+    assert.equal(lib.mediaUrl("", CAST, "127.0.0.1"), "");
+    assert.equal(lib.mediaUrl(null, CAST, "127.0.0.1"), null);
+  });
 });

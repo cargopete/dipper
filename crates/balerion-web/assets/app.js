@@ -77,7 +77,7 @@ const audioQuery = () => (chosenAudio ? `?audio=${chosenAudio}` : "");
  * These live in lib.js, which is loaded first and has tests of its own. They
  * are the parts of this file that are only arithmetic, and they were the parts
  * with no way to run them outside a browser. */
-const { bytes, seconds, roughly, episodeTagOf, feasible, shouldChangeVerdict } =
+const { bytes, seconds, roughly, episodeTagOf, feasible, shouldChangeVerdict, mediaUrl } =
   window.BalerionLib;
 
 function show(node, visible) {
@@ -859,15 +859,27 @@ let castBase = null;
  * AirPlay does not mirror a video element, it hands the receiver the URL and
  * lets it fetch the media itself. An Apple TV given `http://127.0.0.1:8080/...`
  * reaches nothing, so the button appeared to do nothing and the whole feature
- * was a URL to copy by hand.
+ * was a URL to copy by hand. With `--cast-port` on there is a LAN address
+ * serving exactly the same bytes, so playback was pointed at that instead.
  *
- * With `--cast-port` on there is an address the network can reach, serving
- * exactly the same bytes, so playback is pointed at that instead. The browser
- * fetching from its own machine's LAN address costs nothing and it is the only
- * way the receiver ever sees a URL that works. */
+ * That rested on an assumption which used to be true and is not any more: that
+ * the browser and the player are on the same machine, so the player's LAN
+ * address is *this* machine's LAN address and certainly reachable. Move the
+ * player to a box that stays on and watch from a phone over a tunnel, and the
+ * LAN address means nothing to the phone. The video element is handed
+ * `http://192.168.0.13:8081/...`, fetches nothing, and sits at 0:00 with no
+ * error, forever. Which is exactly what it did.
+ *
+ * So the substitution is made only when the page itself came from loopback,
+ * which is the one case where "its own machine's LAN address" is a true
+ * description. Anywhere else the media is fetched from the origin that served
+ * the page, because that is the one address the viewer is known to be able to
+ * reach: they are looking at it.
+ *
+ * Casting is unaffected. The URL offered to a television is built separately in
+ * `showCastUrl`, from `castBase`, and always was. */
 function reachableUrl(path) {
-  if (!castBase || !path || path.startsWith("http")) return path;
-  return `${castBase}${path}`;
+  return mediaUrl(path, castBase, window.location.hostname);
 }
 
 async function loadCastBase() {

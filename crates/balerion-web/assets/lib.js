@@ -113,6 +113,34 @@ function shouldChangeVerdict(previous, next, ratio) {
   return next ? ratio > 1.3 : ratio < 0.9;
 }
 
+/* Which address the media should be fetched from.
+ *
+ * `castBase` is a LAN address serving the same bytes, and exists so that a
+ * television handed a URL can fetch it: AirPlay does not mirror a video
+ * element, it passes the receiver a URL. Pointing playback at it too was free
+ * *while the player and the browser were the same machine*, because then the
+ * player's LAN address is this machine's own.
+ *
+ * Once the player moved to a box that stays on, that stopped being true. A
+ * phone on a tunnel cannot reach `192.168.0.13`, so the video element fetched
+ * nothing and sat at 0:00 with no error to show for it.
+ *
+ * `hostname` is what decides: served from loopback, the player is here and its
+ * LAN address is ours. Served from anywhere else, use the path as given, so
+ * the media comes from the origin that served the page. That is the one
+ * address the viewer is definitely able to reach, since they are looking at it.
+ */
+const LOOPBACK = ["localhost", "127.0.0.1", "[::1]", "::1"];
+
+function mediaUrl(path, castBase, hostname) {
+  if (!path) return path;
+  // Already absolute: whoever built it has decided.
+  if (path.startsWith("http")) return path;
+  if (!castBase) return path;
+  if (!LOOPBACK.includes(hostname)) return path;
+  return `${castBase}${path}`;
+}
+
 const BalerionLib = {
   bytes,
   seconds,
@@ -120,6 +148,7 @@ const BalerionLib = {
   episodeTagOf,
   feasible,
   shouldChangeVerdict,
+  mediaUrl,
 };
 
 // A browser: hang it on the window for app.js to use, and nothing else.
