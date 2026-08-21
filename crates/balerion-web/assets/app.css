@@ -785,6 +785,31 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
     grid-template-columns: 1fr auto;
   }
 
+  /* The shelf and the pending rows: name across the top, then what it is doing
+     beside what you can do about it. Four columns squeezed into a phone put a
+     sentence in a column that will not shrink, and the row ran off the edge. */
+  #downloaded-list li {
+    grid-template-columns: 1fr auto auto;
+    grid-template-areas:
+      "name  name  name"
+      "state watch remove";
+    gap: 0.55rem 0.7rem;
+  }
+  #downloaded-list li > .library-name { grid-area: name; }
+  #downloaded-list li > .library-size { grid-area: state; align-self: center; }
+  #downloaded-list li > button:nth-last-of-type(2) { grid-area: watch; }
+  #downloaded-list li > button:last-of-type { grid-area: remove; }
+
+  #starting-list li {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "name  name"
+      "state action";
+  }
+  #starting-list li > span:first-child { grid-area: name; }
+  #starting-list li > .library-size { grid-area: state; }
+  #starting-list li > button { grid-area: action; justify-self: end; }
+
   /* The same fix as the search site: collapsing four columns to two reflowed a
      result into title-beside-swarm and then size-beside-button, which reads as
      two unrelated half rows. Named areas keep the name on top and the figures
@@ -949,10 +974,16 @@ a:hover { color: var(--rust); }
   display: grid;
   grid-template-columns: 1fr auto auto;
   align-items: center;
-  gap: 1rem;
+  gap: 0.5rem 1rem;
   padding: 0.7rem 0;
   border-bottom: 1px solid var(--border);
   font-size: 0.87rem;
 }
+/* `1fr` is `minmax(auto, 1fr)`, and `auto` will not go below the longest word
+   in the cell. A name pulled out of a magnet is frequently one unbroken string,
+   so the column refuses to shrink and shoves everything after it off the side
+   of the panel. This is the whole of that bug. */
+#starting-list li > *, #downloaded-list li > *, #library-list li > * { min-width: 0; }
+#starting-list li > span:first-child { overflow-wrap: anywhere; }
 #starting-list li:last-child { border-bottom: 0; }
 .state-failed { color: var(--warn); }
