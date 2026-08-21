@@ -175,7 +175,12 @@ impl Storage {
 
 /// Join a torrent-supplied relative path onto a root, refusing anything that
 /// would escape it.
-fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
+///
+/// Public because the file's real path is worth knowing outside this module:
+/// once every piece is on disk there is no reason to read it back through an
+/// HTTP endpoint, and the caller needs the same joining rule rather than its
+/// own approximation of it.
+pub fn safe_join(root: &Path, relative: &str) -> Result<PathBuf> {
     let mut path = root.to_path_buf();
     for segment in relative.split('/') {
         let component = Path::new(segment);

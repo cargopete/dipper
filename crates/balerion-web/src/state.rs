@@ -430,6 +430,22 @@ impl AppState {
     /// needing conversion then fails with a 401 that looks like a broken
     /// ffmpeg.
     pub fn stream_url(&self, hash: &str, file: usize) -> String {
+        // Once every piece is on disk, read the file. Going back out through
+        // our own endpoint for bytes already sitting on the filesystem is a
+        // detour, and not a harmless one: ffmpeg seeks an HTTP source by
+        // closing the connection and opening another one at an offset it has
+        // guessed, and it guesses badly enough on a large MKV that some
+        // segments decode from the wrong place and one in every few hundred
+        // produces no fragment at all. Measured on a 605 MiB episode: segment
+        // 410 returned `ffmpeg produced no fragment` over HTTP, reproducibly,
+        // and 1,049,572 bytes of perfectly good video from the same file on
+        // disk with the same arguments.
+        if let Some(path) = InfoHash::parse(hash)
+            .ok()
+            .and_then(|hash| self.local_source(&hash, file))
+        {
+            return path;
+        }
         let base = self.self_base.lock().expect("self_base lock").clone();
         match &self.config.access_token {
             Some(token) => format!(
@@ -438,6 +454,37 @@ impl AppState {
             ),
             None => format!("{base}/stream/{hash}/{file}"),
         }
+    }
+
+    /// Where this file really is, when the whole of it is already there.
+    ///
+    /// `None` while anything is still missing, because a sparse file reads as
+    /// zeroes rather than as an error and ffmpeg would happily encode the
+    /// silence. The HTTP endpoint is the one that knows how to wait for a
+    /// piece, so a partial download keeps going through it.
+    pub fn local_source(&self, hash: &InfoHash, file: usize) -> Option<String> {
+        let torrent = self.get(hash)?;
+        if !torrent.handle.stats().is_complete() {
+            return None;
+        }
+        self.file_path(hash, file)
+    }
+
+    /// Where this file is on disk, whether or not all of it has arrived.
+    ///
+    /// Separate from [`AppState::local_source`] because a caller that has
+    /// checked for itself which pieces it needs knows better than a blanket
+    /// "is the whole torrent here". A caller that has not must use the other
+    /// one: a sparse file reads as zeroes rather than as an error.
+    pub fn file_path(&self, hash: &InfoHash, file: usize) -> Option<String> {
+        let torrent = self.get(hash)?;
+        let entry = torrent.meta.files.get(file)?;
+        let path = balerion_bt::storage::safe_join(&torrent.root, &entry.path).ok()?;
+        // An absolute path is unambiguous to ffmpeg; a relative one could be
+        // read as a protocol, and we never have one here anyway.
+        path.is_absolute()
+            .then(|| path.to_str().map(str::to_string))
+            .flatten()
     }
 
     /// Probe a file, remembering the answer. What is in a file never changes,

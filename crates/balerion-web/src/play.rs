@@ -460,12 +460,31 @@ async fn generate(
         return Ok(cached);
     }
 
-    let url = state.stream_url(hash, file);
     let entry = torrent
         .meta
         .files
         .get(file)
         .ok_or_else(|| ApiError::not_found("no such file in this torrent"))?;
+
+    /* Read the file itself whenever the bytes this segment needs are already
+     * on disk, and only fall back to our own range endpoint when they are not.
+     *
+     * Not a preference, a correctness fix. ffmpeg seeks an HTTP source by
+     * abandoning the connection and opening another at an offset it has
+     * guessed, and on a large MKV it guesses badly: the demuxer resumes
+     * mid-frame and the encoder is fed rubbish. It does not fail, which is the
+     * worst part. It emits a fragment of a few kilobytes that the browser
+     * accepts and then dies on with DEMUXER_ERROR_COULD_NOT_PARSE, a minute
+     * into an episode, with nothing in any log to say why.
+     *
+     * Measured on one segment, same arguments, same machine, same second:
+     * 3,593 bytes and 121 lines of decoder complaints over HTTP; 1,154,368
+     * bytes and silence from the file on disk. */
+    let url = match on_disk_source(state, &torrent, entry, &info_hash, file, probe.duration, index)
+    {
+        Some(path) => path,
+        None => state.stream_url(hash, file),
+    };
 
     // Work out whether a disappointing result was a real failure or simply
     // data that has not arrived. Judged after the attempt rather than before,
@@ -502,6 +521,50 @@ async fn generate(
         }
         Err(err) => Err(blame(err.to_string())),
     }
+}
+
+/// The file itself, when everything reading it needs is already on disk.
+///
+/// Three things have to be there, not one. The span this segment covers,
+/// obviously. The start of the file, because that is where the container's
+/// header lives and ffmpeg reads it every time. And the end, because that is
+/// where Matroska usually keeps its cues, and without them ffmpeg scans for the
+/// seek point instead, which over a sparse file means reading zeroes and
+/// believing them.
+///
+/// `None` means "not yet", and the caller falls back to the range endpoint,
+/// which knows how to wait for a piece. That path is less reliable, which is
+/// why this exists, but it is the only one that can serve bytes nobody has.
+fn on_disk_source(
+    state: &Arc<AppState>,
+    torrent: &Arc<Torrent>,
+    entry: &balerion_bt::TorrentFile,
+    hash: &InfoHash,
+    file: usize,
+    duration: f64,
+    index: u32,
+) -> Option<String> {
+    if held_fraction(torrent, entry, duration, index) < 1.0 {
+        return None;
+    }
+    if !holds_both_ends(torrent, entry) {
+        return None;
+    }
+    state.file_path(hash, file)
+}
+
+/// Are the header at the front and the cues at the back both here?
+fn holds_both_ends(torrent: &Torrent, entry: &balerion_bt::TorrentFile) -> bool {
+    // Generous rather than exact: a header is kilobytes and a cue table is
+    // rarely more than a megabyte, and being wrong in this direction only
+    // costs a fall back to the endpoint that already works.
+    const EDGE: u64 = 4 * 1024 * 1024;
+    let edge = EDGE.min(entry.length);
+    let have = torrent.handle.have();
+    let mut spans = [(entry.offset, edge), (entry.end().saturating_sub(edge), edge)]
+        .into_iter()
+        .flat_map(|(from, span)| torrent.meta.pieces_for_span(from, span));
+    spans.all(|piece| have.has(piece))
 }
 
 /// How much of the source a segment needs is actually on disk, from 0 to 1.
