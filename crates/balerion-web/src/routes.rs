@@ -565,13 +565,48 @@ pub async fn sweep(state: Arc<AppState>) {
 /// thoroughly miserable way to spend an afternoon.
 const NO_CACHE: (header::HeaderName, &str) = (header::CACHE_CONTROL, "no-cache");
 
+/// A stamp that changes whenever the assets do.
+///
+/// `no-cache` on its own was not enough, and the way it failed is instructive:
+/// it asks a browser to revalidate, there is no validator to revalidate
+/// against, and Chrome is entitled to hand the page its in-memory copy from
+/// earlier in the same session. Reloading the page then runs the previous
+/// build's JavaScript while the server is serving the new one, and the two
+/// disagree about a bug you have already fixed.
+///
+/// So the page asks for the scripts by a name that changes with their contents.
+/// A different build is a different URL and there is nothing to reuse.
+fn asset_stamp() -> &'static str {
+    use std::sync::OnceLock;
+    static STAMP: OnceLock<String> = OnceLock::new();
+    STAMP.get_or_init(|| {
+        // Not a cryptographic hash and not pretending to be one: it only has to
+        // differ when the bytes differ.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in include_str!("../assets/app.js")
+            .bytes()
+            .chain(include_str!("../assets/lib.js").bytes())
+            .chain(include_str!("../assets/app.css").bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    })
+}
+
 pub async fn index() -> impl IntoResponse {
+    let stamp = asset_stamp();
+    let page = include_str!("../assets/index.html")
+        .replace("/app.css\"", &format!("/app.css?v={stamp}\""))
+        .replace("/lib.js\"", &format!("/lib.js?v={stamp}\""))
+        .replace("/app.js\"", &format!("/app.js?v={stamp}\""));
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (NO_CACHE.0, NO_CACHE.1),
         ],
-        include_str!("../assets/index.html"),
+        page,
     )
 }
 
@@ -614,6 +649,34 @@ pub async fn library_script() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_page_asks_for_its_scripts_by_a_stamped_name() {
+        // The trap this closes: a reload that runs the previous build's
+        // JavaScript against the new server, and a bug you have already fixed
+        // appearing to still be there.
+        let body = axum::body::to_bytes(index().await.into_response().into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let page = String::from_utf8(body.to_vec()).unwrap();
+        let stamp = asset_stamp();
+        assert_eq!(stamp.len(), 16, "sixteen hex characters");
+        for asset in ["/app.js", "/lib.js", "/app.css"] {
+            assert!(
+                page.contains(&format!("{asset}?v={stamp}")),
+                "{asset} should be asked for by its stamped name"
+            );
+            assert!(
+                !page.contains(&format!("\"{asset}\"")),
+                "{asset} should not also appear unstamped"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stamp_does_not_wander_between_calls() {
+        assert_eq!(asset_stamp(), asset_stamp());
+    }
 
     fn bits(count: usize, set: &[usize]) -> Bitfield {
         let mut field = Bitfield::empty(count);
