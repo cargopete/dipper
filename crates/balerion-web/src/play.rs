@@ -525,6 +525,17 @@ async fn generate(
             "ffmpeg produced no fragment for segment {index}"
         ))),
         Ok(data) => {
+            /* Not stamped with its position on the timeline, and that is a
+             * known gap rather than an oversight. Every fragment says
+             * `baseMediaDecodeTime = 0`, so a player asked to seek has no
+             * timeline to seek on; [`fmp4::set_start_time`] writes the right
+             * value and is tested, but simply switching it on stops Chrome
+             * playing at all, spinner and no error, and stripping the trailing
+             * `mfra` that then disagrees with it does not help. Something else
+             * in the packaging is wrong too, and shipping half of it is worse
+             * than shipping none: the seek is poor either way, and this way the
+             * episode plays.
+             */
             let data = Arc::new(data);
             state.cache_segment(&info_hash, file, index, audio, Arc::clone(&data));
             Ok(data)
