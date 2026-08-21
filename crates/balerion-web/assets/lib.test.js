@@ -228,6 +228,20 @@ describe("stateOf", () => {
     assert.match(got.label, /^25%, .* left$/);
   });
 
+  it("will not quote an estimate that means nothing", () => {
+    // 7551 hours was on screen. True, useless, and reads as a broken page.
+    const got = lib.stateOf({ ...base, total_length: 800e6, bytes_on_disk: 0, pieces_have: 0, rate: 30 });
+    assert.equal(got.seconds, null, "not offered as a number anybody should act on");
+    assert.equal(got.label, "0%, barely moving");
+  });
+
+  it("still quotes an estimate right up to the threshold", () => {
+    // A day is slow and worth waiting out; the figure should survive.
+    const got = lib.stateOf({ ...base, total_length: 86400, bytes_on_disk: 0, pieces_have: 0, rate: 1 });
+    assert.equal(got.seconds, 86400);
+    assert.match(got.label, /left$/);
+  });
+
   it("refuses to guess when nothing is arriving", () => {
     // A seeder count is not a rate, and an estimate made from one is a lie
     // that looks like a fact.
@@ -268,4 +282,3 @@ describe("stateOf", () => {
     assert.equal(got.seconds, 0);
   });
 });
-

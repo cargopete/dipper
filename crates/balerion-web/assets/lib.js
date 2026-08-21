@@ -196,15 +196,25 @@ function stateOf(item, { roughly: say = roughly } = {}) {
     const left = Math.max(total - held, 0);
     // No rate means no estimate. Saying "a very long time" is true and useless;
     // saying nothing at all is at least not a guess dressed as a fact.
+    /* An estimate is only worth quoting while it means something.
+     *
+     * A trickle of a few hundred bytes a second is arithmetically a rate, and
+     * dividing by it produced "about 7551 hours left" on screen, which is true,
+     * useless, and reads as the page having broken. Past a day the honest thing
+     * is to say it is barely moving and let somebody decide, so the threshold
+     * is a day rather than a number chosen to look tidy. */
     const seconds = rate > 0 ? left / rate : null;
+    const usable = seconds !== null && seconds <= 24 * 3600;
+    const percent = Math.floor(fraction * 100);
     return {
       stage: "downloading",
       fraction,
-      seconds,
-      label:
-        seconds === null
-          ? `${Math.floor(fraction * 100)}%, looking for peers`
-          : `${Math.floor(fraction * 100)}%, ${say(seconds)} left`,
+      seconds: usable ? seconds : null,
+      label: usable
+        ? `${percent}%, ${say(seconds)} left`
+        : seconds === null
+          ? `${percent}%, looking for peers`
+          : `${percent}%, barely moving`,
     };
   }
 

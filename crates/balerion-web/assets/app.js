@@ -1880,7 +1880,11 @@ async function downloadTorrent(what, button) {
   renderStarting();
   try {
     const info = await api("/api/resolve", json({ magnet: what, keep: true }));
+    // Removed from the list *and* redrawn. Forgetting the second half left the
+    // pending row on screen beside the shelf row for the same thing, which
+    // reads as having downloaded it twice.
     starting.delete(what);
+    renderStarting();
     if (button) button.textContent = "Downloading";
     sayInIntake(
       `${info.name} is downloading and will be kept. It is under Downloaded, ` +
@@ -1914,7 +1918,9 @@ function renderStarting() {
     const shown = decodeURIComponent(key).match(/[?&]dn=([^&]+)/);
     name.textContent = shown
       ? decodeURIComponent(shown[1]).replace(/\+/g, " ")
-      : `${key.slice(0, 40)}…`;
+      // An archive.org identifier has no display name and is usually short
+      // enough to show whole. Only trim what is actually too long.
+      : key.length > 44 ? `${key.slice(0, 44)}…` : key;
 
     const state = document.createElement("span");
     state.className = item.failed ? "library-size state-failed" : "library-size state-downloading";
