@@ -40,8 +40,21 @@ const READAHEAD_SECONDS: f64 = 30.0;
 const MIN_READAHEAD: u64 = 2 * 1024 * 1024;
 const MAX_READAHEAD: u64 = 48 * 1024 * 1024;
 
-/// Pieces at the end of the file to keep warm for index boxes.
-const TAIL_PIECES: usize = 2;
+/// Bytes at the end of the file to keep warm, for the index a container parks
+/// there: an MP4's `moov` when it was not written faststart, Matroska's cues,
+/// an AVI's `idx1`.
+///
+/// In bytes rather than in pieces because two consumers have to agree on it
+/// exactly. This is the span the streaming prefetch asks for, and it is also
+/// the span [`crate::play`] checks before it will read the file from disk
+/// rather than back through this endpoint. Expressed in pieces, those two
+/// rounded to different piece ranges on the same file, the check could never
+/// pass, and every segment of a part-downloaded episode went the slow and
+/// unreliable way round.
+///
+/// Four megabytes because an hour of AVI has an `idx1` of about one and a half,
+/// and the old two pieces was half of that.
+pub const TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct StreamQuery {
@@ -169,9 +182,8 @@ async fn prioritise(torrent: &Arc<Torrent>, file: (u64, u64), global_start: u64,
 
     // The end of the file, for index boxes parked in the tail. Cheap, and the
     // difference between a non-faststart MP4 playing and hanging.
-    let tail_start =
-        file_offset + file_length.saturating_sub(meta.piece_length * TAIL_PIECES as u64);
-    spans.push(meta.pieces_for_span(tail_start, meta.piece_length * TAIL_PIECES as u64));
+    let tail_start = file_offset + file_length.saturating_sub(TAIL_BYTES);
+    spans.push(meta.pieces_for_span(tail_start, TAIL_BYTES));
 
     // The rest of this file, but nothing else in the torrent. Without this the
     // picker falls through to rarest-first across everything, and a 900 MB

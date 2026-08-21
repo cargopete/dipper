@@ -466,6 +466,16 @@ async fn generate(
         .get(file)
         .ok_or_else(|| ApiError::not_found("no such file in this torrent"))?;
 
+    /* Say what this segment needs, because in transcode mode nothing else
+     * will. The streaming prefetch lives in the range endpoint and runs when a
+     * browser fetches from it; a transcoded file is fetched by ffmpeg, and once
+     * ffmpeg is reading the file from disk it never touches that endpoint at
+     * all. Without this the picker is left downloading whatever it fancies
+     * while the viewer waits on the one span it is not asking for. */
+    if !torrent.handle.stats().is_complete() {
+        want_for_segment(&torrent, entry, probe.duration, index).await;
+    }
+
     /* Read the file itself whenever the bytes this segment needs are already
      * on disk, and only fall back to our own range endpoint when they are not.
      *
@@ -523,6 +533,32 @@ async fn generate(
     }
 }
 
+/// Ask the picker for the pieces this segment will want.
+///
+/// In order: the span itself, then both ends of the file, then the rest of it.
+/// The ends matter as much as the span, because until they arrive the segment
+/// has to be read back through the range endpoint, and ffmpeg seeking that
+/// produces fragments the browser cannot parse.
+async fn want_for_segment(
+    torrent: &Arc<Torrent>,
+    entry: &balerion_bt::TorrentFile,
+    duration: f64,
+    index: u32,
+) {
+    let meta = &torrent.meta;
+    let mut spans = Vec::with_capacity(4);
+    if let Some((from, span)) = estimated_span(entry.offset, entry.length, duration, index) {
+        spans.push(meta.pieces_for_span(from, span));
+    }
+    let edge = crate::stream::TAIL_BYTES.min(entry.length);
+    spans.push(meta.pieces_for_span(entry.offset, edge));
+    spans.push(meta.pieces_for_span(entry.end().saturating_sub(edge), edge));
+    // The rest of this file, but nothing else in the torrent: an extras track
+    // nobody is watching should not compete with the episode that is playing.
+    spans.push(meta.pieces_for_span(entry.offset, entry.length));
+    torrent.handle.prioritise(spans).await;
+}
+
 /// The file itself, when everything reading it needs is already on disk.
 ///
 /// Three things have to be there, not one. The span this segment covers,
@@ -555,11 +591,10 @@ fn on_disk_source(
 
 /// Are the header at the front and the cues at the back both here?
 fn holds_both_ends(torrent: &Torrent, entry: &balerion_bt::TorrentFile) -> bool {
-    // Generous rather than exact: a header is kilobytes and a cue table is
-    // rarely more than a megabyte, and being wrong in this direction only
-    // costs a fall back to the endpoint that already works.
-    const EDGE: u64 = 4 * 1024 * 1024;
-    let edge = EDGE.min(entry.length);
+    // The same span the streaming prefetch asks for, deliberately shared: two
+    // different definitions of "the end of the file" round to two different
+    // piece ranges, and then this can never be satisfied by what that fetches.
+    let edge = crate::stream::TAIL_BYTES.min(entry.length);
     let have = torrent.handle.have();
     let mut spans = [(entry.offset, edge), (entry.end().saturating_sub(edge), edge)]
         .into_iter()
