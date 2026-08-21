@@ -1038,10 +1038,14 @@ function showCastUrl() {
     show(el.cast, false);
     return;
   }
+  /* The address of the thing actually being played.
+   *
+   * `playInfo.url` is the converted copy when there is one, and the raw file
+   * when there is not. Building it by hand as `/stream/...` handed a television
+   * the original Matroska instead, which it cannot decode: the very file the
+   * conversion exists to replace. */
   const path =
-    playInfo.mode === "transcode"
-      ? playInfo.playlist
-      : `/stream/${current.infohash}/${playing}`;
+    playInfo.mode === "transcode" ? playInfo.playlist : playInfo.url;
   if (!path) {
     show(el.cast, false);
     return;

@@ -38,6 +38,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/subtitles/{hash}/{file}/fetched", get(play::fetched))
         // The file itself, for anything a television can already open.
         .route("/stream/{hash}/{file}", get(stream::handler))
+        /* The converted copy, which is the one a television actually wants.
+         *
+         * Without this an Apple TV handed the URL of a prepared file got a 404
+         * and AirPlay simply died, while the player beside it was playing the
+         * same film perfectly. Everything on this listener is read-only media,
+         * and a finished MP4 is the most read-only thing here. */
+        .route("/ready/{hash}/{file}", get(crate::convert::serve))
         .with_state(state)
 }
 
