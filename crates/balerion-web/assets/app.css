@@ -784,32 +784,6 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
   #file-list li, #library-list li {
     grid-template-columns: 1fr auto;
   }
-
-  /* The shelf and the pending rows: name across the top, then what it is doing
-     beside what you can do about it. Four columns squeezed into a phone put a
-     sentence in a column that will not shrink, and the row ran off the edge. */
-  #downloaded-list li {
-    grid-template-columns: 1fr auto auto;
-    grid-template-areas:
-      "name  name  name"
-      "state watch remove";
-    gap: 0.55rem 0.7rem;
-  }
-  #downloaded-list li > .library-name { grid-area: name; }
-  #downloaded-list li > .library-size { grid-area: state; align-self: center; }
-  #downloaded-list li > button:nth-last-of-type(2) { grid-area: watch; }
-  #downloaded-list li > button:last-of-type { grid-area: remove; }
-
-  #starting-list li {
-    grid-template-columns: 1fr auto;
-    grid-template-areas:
-      "name  name"
-      "state action";
-  }
-  #starting-list li > span:first-child { grid-area: name; }
-  #starting-list li > .library-size { grid-area: state; }
-  #starting-list li > button { grid-area: action; justify-self: end; }
-
   /* The same fix as the search site: collapsing four columns to two reflowed a
      result into title-beside-swarm and then size-beside-button, which reads as
      two unrelated half rows. Named areas keep the name on top and the figures
@@ -825,6 +799,17 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
   .result-title { grid-area: title; }
   .result-swarm { grid-area: swarm; }
   .result-size { grid-area: size; }
+  /* The wrapper is the grid item, not the buttons inside it. Naming the area on
+     `.button-small` places nothing, because a button inside `.result-actions`
+     is not a child of this grid, so the wrapper was auto-placed and every row
+     ran off the side. Measured: all twenty-four of them at 386px. */
+  #result-list .result-actions {
+    grid-area: action;
+    justify-self: end;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
   #result-list .button-small { grid-area: action; justify-self: end; }
 
   /* Thumbs, not pointers. */
@@ -922,6 +907,14 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
 }
 .library-bar[data-stage="preparing"] > span { background: var(--accent); }
 
+/* The state is a sentence, not a figure. `.library-size` is `nowrap` so that
+   "605 MiB" never breaks across two lines, which is right for a number and
+   wrong for "17%, about 40 minutes left": that one overflowed its cell and lay
+   across the button beside it. Measured at 386px: 255px of text in a 181px box. */
+.state-downloading, .state-preparing, .state-failed {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .state-downloading, .state-preparing { color: var(--rust); }
 .state-ready { color: var(--ok); }
 .state-playable { color: var(--text-muted); }
@@ -987,3 +980,54 @@ a:hover { color: var(--rust); }
 #starting-list li > span:first-child { overflow-wrap: anywhere; }
 #starting-list li:last-child { border-bottom: 0; }
 .state-failed { color: var(--warn); }
+
+/* ---- the lists on a phone ------------------------------------------------
+ *
+ * Deliberately at the end of the file rather than up in the main narrow block.
+ * These three lists have their base rules further down than that block, and a
+ * rule of equal specificity that comes later wins, so the overrides were being
+ * quietly undone: the continue row kept `display: flex`, its title was left a
+ * column two words across, and a release name came out as fourteen lines of
+ * one word each. Measured, not guessed: 82px of title in a 386px viewport.
+ *
+ * Anything added below here must stay below the rules it overrides. */
+@media (max-width: 860px) {
+  /* The shelf and the pending rows: name across the top, then what it is doing
+     beside what you can do about it. Four columns squeezed into a phone put a
+     sentence in a column that will not shrink, and the row ran off the edge. */
+  #downloaded-list li {
+    grid-template-columns: 1fr auto auto;
+    grid-template-areas:
+      "name  name  name"
+      "state watch remove";
+    gap: 0.55rem 0.7rem;
+  }
+  #downloaded-list li > .library-name { grid-area: name; }
+  #downloaded-list li > .library-size { grid-area: state; align-self: center; }
+  #downloaded-list li > button:nth-last-of-type(2) { grid-area: watch; }
+  #downloaded-list li > button:last-of-type { grid-area: remove; }
+
+  #starting-list li {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "name  name"
+      "state action";
+  }
+  #starting-list li > span:first-child { grid-area: name; }
+  #starting-list li > .library-size { grid-area: state; }
+  #starting-list li > button { grid-area: action; justify-self: end; }
+
+  /* The continue row: title on top, then the bar beside the button. */
+  #continuing-list li {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "title  title"
+      "bar    action";
+    gap: 0.55rem 0.9rem;
+    align-items: center;
+  }
+  #continuing-list li > .result-title { grid-area: title; min-width: 0; }
+  #continuing-list li > .progress { grid-area: bar; }
+  #continuing-list li > button { grid-area: action; justify-self: end; }
+}

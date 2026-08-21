@@ -1920,7 +1920,7 @@ function renderStarting() {
     state.className = item.failed ? "library-size state-failed" : "library-size state-downloading";
     state.textContent = item.failed
       ? item.failed
-      : "asking the swarm for the file list";
+      : "asking the swarm";
 
     const give = document.createElement("button");
     give.type = "button";
