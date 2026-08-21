@@ -205,3 +205,67 @@ describe("seriesOf", () => {
     assert.equal(lib.seriesOf("Some Film 2024 1080p"), null);
   });
 });
+
+/* The download-first path lives or dies on this row of text: somebody looks at
+   it and decides whether to wait. */
+describe("stateOf", () => {
+  const base = {
+    total_length: 1000,
+    bytes_on_disk: 0,
+    pieces_have: 0,
+    pieces_total: 100,
+    rate: 0,
+    complete: false,
+    preparing: null,
+    ready: false,
+  };
+
+  it("says how long is left, when there is a rate to say it from", () => {
+    const got = lib.stateOf({ ...base, pieces_have: 25, bytes_on_disk: 250, rate: 10 });
+    assert.equal(got.stage, "downloading");
+    assert.equal(got.fraction, 0.25);
+    assert.equal(got.seconds, 75);
+    assert.match(got.label, /^25%, .* left$/);
+  });
+
+  it("refuses to guess when nothing is arriving", () => {
+    // A seeder count is not a rate, and an estimate made from one is a lie
+    // that looks like a fact.
+    const got = lib.stateOf({ ...base, pieces_have: 25, bytes_on_disk: 250, rate: 0 });
+    assert.equal(got.seconds, null);
+    assert.equal(got.label, "25%, looking for peers");
+  });
+
+  it("moves to preparing once it is all here", () => {
+    const got = lib.stateOf({ ...base, complete: true, bytes_on_disk: 1000, preparing: 0.6 });
+    assert.equal(got.stage, "preparing");
+    assert.equal(got.label, "downloaded, preparing 60%");
+  });
+
+  it("calls it ready only when it has been converted", () => {
+    const got = lib.stateOf({ ...base, complete: true, ready: true });
+    assert.equal(got.stage, "ready");
+    assert.equal(got.label, "ready");
+  });
+
+  it("something needing no conversion is downloaded rather than ready", () => {
+    // An MP4 browsers already open is finished without anything being done to
+    // it, and claiming it was prepared would be untrue.
+    const got = lib.stateOf({ ...base, complete: true, ready: false, preparing: null });
+    assert.equal(got.stage, "playable");
+    assert.equal(got.label, "downloaded");
+  });
+
+  it("copes with a torrent nothing is known about yet", () => {
+    const got = lib.stateOf({ ...base, pieces_total: 0, total_length: 0 });
+    assert.equal(got.fraction, 0);
+    assert.equal(got.seconds, null);
+  });
+
+  it("never reports more held than there is", () => {
+    // Resume counts bytes from an earlier run and can overshoot slightly.
+    const got = lib.stateOf({ ...base, bytes_on_disk: 1200, pieces_have: 100, rate: 10 });
+    assert.equal(got.seconds, 0);
+  });
+});
+

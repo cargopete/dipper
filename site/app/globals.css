@@ -8,26 +8,54 @@
  * the two surfaces should look like one product, and the local player cannot
  * have any. */
 
+/* The cargopete palette, shipped unchanged, and the same one the local player
+   carries: two surfaces, one product. Warm dark ground, two accents with
+   distinct jobs. Slate is the machine (seeders, sizes, counts, the primary
+   action); terracotta is the page (kickers, labels, markers, hover). The
+   legacy names are aliases, not a second palette. */
 :root {
-  --void: #0a0a0b;
-  --panel: #131316;
-  --panel-high: #1b1b1f;
-  --rule: #24242a;
-  --rule-strong: #34343d;
-  --ink: #f3f2f0;
-  --ink-soft: #9c9ca6;
-  --ink-faint: #6f6f79;
-  --accent: #e0703c;
-  --accent-lift: #ee7f49;
-  --accent-ink: #140a05;
-  --good: #57b37c;
-  --bad: #e2635c;
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
-  --radius-surface: 12px;
-  --radius-control: 8px;
+  --bg:       #171614;
+  --bg-elev:  #201f1c;
+  --bg-code:  #1b1a17;
+  --bg-inset: #262420;
+
+  --border:    rgba(255, 255, 255, 0.09);
+  --border-hi: rgba(255, 255, 255, 0.16);
+
+  --text:       #ece9e3;
+  --text-muted: #9c978c;
+  --text-faint: #6e6a61;
+
+  --accent:     #8bb8dc;
+  --accent-ink: #cfe3f2;
+  --rust:       #cd8560;
+
+  --ok:   #86b592;
+  --warn: #cdb06a;
+
+  --pale-blue-bg:  rgba(139, 184, 220, 0.12);
+  --pale-rust-bg:  rgba(205, 133, 96, 0.12);
+  --pale-green-bg: rgba(134, 181, 146, 0.12);
+
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+  --sans: 'Space Grotesk', ui-sans-serif, system-ui, 'Helvetica Neue', sans-serif;
+
+  --void: var(--bg);
+  --panel: var(--bg-elev);
+  --panel-high: var(--bg-inset);
+  --rule: var(--border);
+  --rule-strong: var(--border-hi);
+  --ink: var(--text);
+  --ink-soft: var(--text-muted);
+  --ink-faint: var(--text-faint);
+  --accent-lift: var(--accent-ink);
+  --good: var(--ok);
+  --bad: var(--rust);
+
+  --radius-surface: 10px;
+  --radius-control: 6px;
   --gap: 1.5rem;
-  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -44,7 +72,7 @@ body {
   -webkit-font-smoothing: antialiased;
   background-image: radial-gradient(
     120rem 26rem at 50% -13rem,
-    rgba(224, 112, 60, 0.10),
+    var(--pale-rust-bg),
     transparent 70%
   );
   background-repeat: no-repeat;
@@ -63,7 +91,7 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.015em; }
   gap: 1rem;
   height: 64px;
   padding: 0 var(--gap);
-  background: rgba(10, 10, 11, 0.72);
+  background: rgba(23, 22, 20, 0.78);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--rule);
 }
@@ -83,7 +111,7 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.015em; }
   margin-right: 0.75rem;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0.55rem rgba(224, 112, 60, 0.75);
+  box-shadow: 0 0 0.55rem transparent;
   vertical-align: 0.06em;
 }
 
@@ -238,7 +266,7 @@ input, select {
   padding: 0.8rem 0.9rem;
   transition: border-color 140ms var(--ease);
 }
-input:hover, select:hover { border-color: #43434e; }
+input:hover, select:hover { border-color: var(--border-hi); }
 select { cursor: pointer; }
 input::placeholder { color: var(--ink-faint); }
 
@@ -647,3 +675,36 @@ ul.results li:nth-child(10) { animation-delay: 180ms; }
   button:active { transform: none; }
   .skeleton-row { background-image: none; }
 }
+
+/* ---- the two voices ------------------------------------------------------
+ *
+ * Section kickers and field labels are stamped plates and belong to the page,
+ * so they are terracotta. Anything an index measured, a seeder count or a size
+ * or a year, is the machine, so it is slate. Getting this wrong produces a page
+ * that is warm-grey plus blue and has half a palette. */
+.kicker { color: var(--rust); }
+label { color: var(--rust); }
+.masthead-note { color: var(--rust); }
+.masthead-link { color: var(--rust); }
+.results-head h2 { color: var(--rust); }
+.show-meta { color: var(--rust); }
+.episode-tag { color: var(--rust); }
+.hint-caution { border-left-color: var(--rust); }
+.show-card[aria-selected="true"] { border-color: var(--rust); }
+.row-actions .button-small:not(.quiet) { background: var(--accent); color: #14202a; }
+
+.result-size,
+.result-swarm,
+.results-count,
+.show-year {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Under about ten seeders a stream will not keep ahead of the playhead, and
+   that is the page warning a person rather than reporting a number. */
+.result-seeders-thin { color: var(--warn); }
+
+.modes button[aria-selected="true"] { color: var(--text); }
+.modes button[aria-selected="true"]::after { background: var(--rust); }
+a:hover, .button-small.quiet:hover { color: var(--rust); border-color: var(--rust); }

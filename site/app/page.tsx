@@ -278,7 +278,7 @@ export default function Page() {
      
      Separate because this one can be slow or never answer: it depends on a
      laptop being awake, and the menu must not. Silent on failure for the same
-     reason — a machine being asleep is not an error worth putting in front of
+     reason: a machine being asleep is not an error worth putting in front of
      somebody, it just means there is less to choose from. */
   useEffect(() => {
     fetch("/api/search?sources")

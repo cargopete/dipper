@@ -26,43 +26,69 @@
  * at paint time, so those three names are load-bearing. Renaming them silently
  * turns the piece map into black on black. */
 
+/* The cargopete palette, shipped unchanged.
+ *
+ * Warm dark, never grey and never black: the ground reads as unlit wood, and
+ * the difference is visible the moment a warm accent sits on it. Two accents,
+ * and both of them have a job, which is the rule most easily got wrong.
+ *
+ *   slate  #8bb8dc  the machine's voice: rates, counts, peers, pieces, the
+ *                   primary action, links, focus rings.
+ *   rust   #cd8560  the human voice: section kickers, units and suffixes, the
+ *                   marker on the thing that is happening now, hover.
+ *
+ * The legacy names below are aliases rather than a second palette. `drawMap`
+ * reads `--panel`, `--accent` and `--ink` off the root at paint time, so those
+ * three are load-bearing and renaming them turns the piece map black on black.
+ */
 :root {
-  /* Ground and surfaces. Three steps, not five: a hierarchy nobody can see is
-     not a hierarchy. */
-  --void: #0a0a0b;
-  --panel: #131316;
-  --panel-high: #1b1b1f;
+  /* surfaces: four tiers, warm, brown-shifted, never cool grey */
+  --bg:       #171614;
+  --bg-elev:  #201f1c;
+  --bg-code:  #1b1a17;
+  --bg-inset: #262420;
 
-  --rule: #24242a;
-  --rule-strong: #34343d;
+  /* borders: the entire vocabulary of separation. Never a shadow. */
+  --border:    rgba(255, 255, 255, 0.09);
+  --border-hi: rgba(255, 255, 255, 0.16);
 
-  --ink: #f3f2f0;
-  --ink-soft: #9c9ca6;
-  --ink-faint: #6f6f79;
+  /* ink: three tiers, and the faint one is decorative only */
+  --text:       #ece9e3;
+  --text-muted: #9c978c;
+  --text-faint: #6e6a61;
 
-  /* Ember: the one accent, and the reason this page is not blue. Balerion was
-     not a tasteful shade of corporate cobalt. Saturation held under 80% so it
-     reads as heat rather than as a highlighter. */
-  --accent: #e0703c;
-  --accent-lift: #ee7f49;
-  --accent-ink: #140a05;
+  --accent:     #8bb8dc;
+  --accent-ink: #cfe3f2;
+  --rust:       #cd8560;
 
-  /* Status, desaturated to sit in the same room as the ember. */
-  --good: #57b37c;
-  --bad: #e2635c;
+  --ok:   #86b592;
+  --warn: #cdb06a;
 
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  --pale-blue-bg:  rgba(139, 184, 220, 0.12);
+  --pale-rust-bg:  rgba(205, 133, 96, 0.12);
+  --pale-green-bg: rgba(134, 181, 146, 0.12);
 
-  --radius-surface: 12px;
-  --radius-control: 8px;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+  --sans: 'Space Grotesk', ui-sans-serif, system-ui, 'Helvetica Neue', sans-serif;
+
+  /* Aliases, so the rest of this file and the canvas keep working. */
+  --void: var(--bg);
+  --panel: var(--bg-elev);
+  --panel-high: var(--bg-inset);
+  --rule: var(--border);
+  --rule-strong: var(--border-hi);
+  --ink: var(--text);
+  --ink-soft: var(--text-muted);
+  --ink-faint: var(--text-faint);
+  --accent-lift: var(--accent-ink);
+  --good: var(--ok);
+  --bad: var(--rust);
+
+  --radius-surface: 10px;
+  --radius-control: 6px;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
   --gap: 1.5rem;
-  --rail: 15rem;
-
-  /* One easing curve for the whole page. Mixing curves reads as several people
-     having worked on it separately, which is exactly what happened. */
-  --ease: cubic-bezier(0.2, 0, 0.2, 1);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -88,7 +114,7 @@ body {
      travel with the scroll and become a gradient nobody asked for. */
   background-image: radial-gradient(
     120rem 26rem at 50% -13rem,
-    rgba(224, 112, 60, 0.10),
+    var(--pale-rust-bg),
     transparent 70%
   );
   background-repeat: no-repeat;
@@ -139,7 +165,7 @@ a { color: var(--accent); text-underline-offset: 2px; }
      name has ideas above its station. */
   height: 64px;
   padding: 0 var(--gap);
-  background: rgba(10, 10, 11, 0.72);
+  background: rgba(23, 22, 20, 0.78);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--rule);
 }
@@ -162,7 +188,7 @@ a { color: var(--accent); text-underline-offset: 2px; }
   margin-right: 0.75rem;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0.55rem rgba(224, 112, 60, 0.75);
+  box-shadow: none;
   vertical-align: 0.06em;
 }
 
@@ -294,7 +320,7 @@ label {
   font-size: 0.64rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--ink-faint);
+  color: var(--rust);
 }
 
 .field input, .field select, input[type="text"] {
@@ -309,7 +335,7 @@ label {
   transition: border-color 140ms var(--ease);
 }
 .field input:hover, .field select:hover, input[type="text"]:hover {
-  border-color: #43434e;
+  border-color: var(--border-hi);
 }
 .field select { cursor: pointer; }
 .field input::placeholder, input[type="text"]::placeholder {
@@ -360,12 +386,15 @@ label {
   padding-bottom: 0.6rem;
   border-bottom: 1px solid var(--rule-strong);
 }
-.results-head h2, .files h3, #library h2 {
+/* The kicker: the equivalent of the engraved plate above a dial, and the reason
+   a section reads as part of an instrument rather than as a heading. Terracotta
+   because it is the page speaking, not the machine. */
+.results-head h2, .files h3, #library h2, #continuing-heading, .cast-label {
   font-family: var(--mono);
   font-size: 0.66rem;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--ink-faint);
+  color: var(--rust);
 }
 .results-count {
   margin: 0;
@@ -498,10 +527,10 @@ label {
   align-items: center;
   justify-content: center;
   min-height: 19rem;
-  background: #000;
+  background: var(--bg-code);
 }
 
-video { width: 100%; max-height: 70vh; display: block; background: #000; }
+video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code); }
 
 .viewer-note {
   margin: 0;
@@ -706,7 +735,7 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
   background-image: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.06),
     transparent
   );
   background-size: 40% 100%;
@@ -845,3 +874,70 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
   padding: 0.6rem 0;
   border-bottom: 1px solid var(--rule);
 }
+
+
+/* ---- the download-first path ---------------------------------------------
+ *
+ * One row, four states, and the colour says which voice is speaking. Arriving
+ * and converting are things happening now, so they are terracotta; a rate or a
+ * count the machine measured is slate. */
+.library-name { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+.library-bar {
+  display: block;
+  height: 2px;
+  background: var(--bg-inset);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.library-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--rust);
+  transition: width 400ms var(--ease);
+}
+.library-bar[data-stage="preparing"] > span { background: var(--accent); }
+
+.state-downloading, .state-preparing { color: var(--rust); }
+.state-ready { color: var(--ok); }
+.state-playable { color: var(--text-muted); }
+
+/* A count or a rate is the machine talking. */
+.reading-value, .result-seeders, .results-count { color: var(--accent); }
+.result-seeders-thin { color: var(--rust); }
+
+/* The one live marker on the page. */
+.badge-kept { color: var(--rust); border-color: color-mix(in oklab, var(--rust) 55%, transparent); }
+.badge-ready { color: var(--ok); border-color: color-mix(in oklab, var(--ok) 55%, transparent); }
+
+/* Hover is the page acknowledging a person, so it is the person's colour. */
+#result-list li:hover .result-title,
+#downloaded-list li:hover,
+#library-list li:hover { color: var(--text); }
+.button-quiet:hover { border-color: var(--rust); color: var(--rust); }
+a:hover { color: var(--rust); }
+
+/* The reading's label is a stamped plate; the number beside it is the machine.
+   Splitting them across the two accents is the clearest statement in the whole
+   page of which voice is which. */
+.reading dt { color: var(--rust); }
+.reading dd { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+/* The file being watched, marked rather than merely coloured differently. */
+.file-name.playing { color: var(--text); }
+.file-name.playing::before {
+  content: "";
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-right: 0.55rem;
+  border-radius: 50%;
+  background: var(--rust);
+  vertical-align: 0.05em;
+}
+
+/* A caution is the page warning a person, in the person's colour. */
+.hint-caution { border-left-color: var(--rust); }
+
+/* The badge at rest, before it has anything to report. */
+.badge { color: var(--text-faint); }
+.badge-temporary { color: var(--rust); }

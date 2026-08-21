@@ -16,7 +16,7 @@
  * Wrapped in a function so that nothing but `BalerionLib` escapes. A bare
  * `function bytes()` at the top level of a classic script becomes a global, and
  * app.js's `const { bytes } = ...` then fails with "Identifier 'bytes' has
- * already been declared" — which kills the entire script, leaves the page with
+ * already been declared", which kills the entire script, leaves the page with
  * no event handlers at all, and cannot be caught by checking either file on its
  * own.
  */
@@ -170,6 +170,60 @@ function mediaUrl(path, castBase, hostname) {
   return `${castBase}${path}`;
 }
 
+/* Which of four states a thing in the library is in, and what to say about it.
+ *
+ * The whole point of the download-first path is that a person can look at a row
+ * and know whether to put the kettle on. That means one function deciding, and
+ * it means being honest when the answer is "nobody knows": a swarm with no
+ * peers has no rate, and inventing an estimate from a seeder count would be
+ * making something up.
+ *
+ * The four:
+ *
+ *   downloading  still arriving. Says how much and how long.
+ *   preparing    all here, being converted. Says how far.
+ *   ready        converted. Starts at once and seeks to the frame.
+ *   playable     all here and needing no conversion, which is what an MP4
+ *                that browsers already open looks like.
+ */
+function stateOf(item, { roughly: say = roughly } = {}) {
+  const total = item.total_length || 0;
+  const held = item.bytes_on_disk || 0;
+
+  if (!item.complete) {
+    const fraction = item.pieces_total ? item.pieces_have / item.pieces_total : 0;
+    const rate = item.rate || 0;
+    const left = Math.max(total - held, 0);
+    // No rate means no estimate. Saying "a very long time" is true and useless;
+    // saying nothing at all is at least not a guess dressed as a fact.
+    const seconds = rate > 0 ? left / rate : null;
+    return {
+      stage: "downloading",
+      fraction,
+      seconds,
+      label:
+        seconds === null
+          ? `${Math.floor(fraction * 100)}%, looking for peers`
+          : `${Math.floor(fraction * 100)}%, ${say(seconds)} left`,
+    };
+  }
+
+  if (item.preparing !== null && item.preparing !== undefined) {
+    return {
+      stage: "preparing",
+      fraction: item.preparing,
+      seconds: null,
+      label: `downloaded, preparing ${Math.floor(item.preparing * 100)}%`,
+    };
+  }
+
+  if (item.ready) {
+    return { stage: "ready", fraction: 1, seconds: 0, label: "ready" };
+  }
+
+  return { stage: "playable", fraction: 1, seconds: 0, label: "downloaded" };
+}
+
 const BalerionLib = {
   bytes,
   seconds,
@@ -179,6 +233,7 @@ const BalerionLib = {
   feasible,
   shouldChangeVerdict,
   mediaUrl,
+  stateOf,
 };
 
 // A browser: hang it on the window for app.js to use, and nothing else.

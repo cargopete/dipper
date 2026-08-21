@@ -81,7 +81,7 @@ const audioQuery = () => (chosenAudio ? `?audio=${chosenAudio}` : "");
  * These live in lib.js, which is loaded first and has tests of its own. They
  * are the parts of this file that are only arithmetic, and they were the parts
  * with no way to run them outside a browser. */
-const { bytes, seconds, roughly, episodeTagOf, seriesOf, feasible, shouldChangeVerdict, mediaUrl } =
+const { bytes, seconds, roughly, episodeTagOf, seriesOf, feasible, shouldChangeVerdict, mediaUrl, stateOf } =
   window.BalerionLib;
 
 function show(node, visible) {
@@ -658,7 +658,7 @@ async function play(index) {
  * The Media Session API is the difference between "a web page that happens to
  * be playing audio" and something that behaves like a television. It puts the
  * title on the lock screen, in the notification shade and on a watch, and it
- * routes the hardware buttons — headphone pause, car stereo skip — at the page
+ * routes the hardware buttons (headphone pause, car stereo skip) at the page
  * instead of at nothing.
  *
  * Cheap, standard, and supported by every phone browser worth the name. The
@@ -1251,23 +1251,23 @@ function libraryRow(item, { withBadge = true } = {}) {
   const name = document.createElement("span");
   name.textContent = item.name;
 
+  /* The one line somebody reads to decide whether to put the kettle on. */
+  const state = stateOf(item);
   const size = document.createElement("span");
-  size.className = "library-size";
-  const percent = item.pieces_total
-    ? Math.floor((item.pieces_have / item.pieces_total) * 100)
-    : 0;
-  /* Three states worth telling apart, because they mean different things to
-     somebody deciding what to watch. Still arriving. Here, but still being
-     converted, so it will play but the seeking will be slow. And ready, which
-     means it starts instantly, scrubs instantly, and will go to a television. */
-  if (!item.complete) {
-    size.textContent = `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
-  } else if (item.preparing !== null && item.preparing !== undefined) {
-    size.textContent = `preparing ${Math.floor(item.preparing * 100)}%`;
-    size.title = "Converting it so it starts and seeks instantly, and plays on a television";
-  } else {
-    size.textContent = bytes(item.total_length);
+  size.className = `library-size state-${state.stage}`;
+  size.textContent = state.stage === "ready" ? bytes(item.total_length) : state.label;
+  if (state.stage === "preparing") {
+    size.title = "Converting it so it starts at once, seeks to the frame, and plays on a television";
   }
+
+  // A bar under the name, because a number is read and a bar is glanced at.
+  const bar = document.createElement("span");
+  bar.className = "library-bar";
+  bar.dataset.stage = state.stage;
+  const filled = document.createElement("span");
+  filled.style.width = `${Math.round(state.fraction * 100)}%`;
+  bar.append(filled);
+  show(bar, state.stage === "downloading" || state.stage === "preparing");
 
   // Reopen something already on disk. Resolving by infohash finds the
   // running session rather than starting a second one, so a part-finished
@@ -1296,21 +1296,26 @@ function libraryRow(item, { withBadge = true } = {}) {
     refresh();
   });
 
-  const badge = document.createElement("span");
-  if (item.ready) {
-    // The one worth shouting about: this is the Netflix-grade state.
-    badge.className = "badge badge-ready";
-    badge.textContent = "ready";
-    badge.title = "Converted: instant start, instant seeking, plays on a television";
-  } else {
-    badge.className = item.kept ? "badge badge-kept" : "badge";
-    badge.textContent = item.kept ? "kept" : "temporary";
+  /* The action says what it will actually be like, rather than always
+     promising the same thing. Watching something still arriving is allowed and
+     is sometimes what you want; it should not be dressed up as the good path. */
+  open.textContent = { ready: "Watch", playable: "Watch", preparing: "Watch anyway", downloading: "Watch anyway" }[state.stage];
+  open.className = state.stage === "ready" || state.stage === "playable" ? "button-small" : "button-quiet";
+  if (state.stage === "downloading") {
+    open.title = "It will play, but it can only go as fast as it is arriving";
   }
 
-  if (withBadge || item.ready) {
-    row.append(name, size, badge, open, remove);
+  const holder = document.createElement("span");
+  holder.className = "library-name";
+  holder.append(name, bar);
+
+  if (withBadge) {
+    const badge = document.createElement("span");
+    badge.className = item.kept ? "badge badge-kept" : "badge";
+    badge.textContent = item.kept ? "kept" : "temporary";
+    row.append(holder, size, badge, open, remove);
   } else {
-    row.append(name, size, open, remove);
+    row.append(holder, size, open, remove);
   }
   return row;
 }
@@ -1787,24 +1792,30 @@ function renderResults(data) {
     size.className = "result-size";
     size.textContent = view.size ? bytes(view.size) : "";
 
-    const action = document.createElement("button");
-    action.type = "button";
-    action.className = "button-small";
-    action.textContent = "Watch";
-    action.addEventListener("click", () => openTorrent(view.open));
-
-    /* The persistent way in. Watch borrows a copy and opens the player;
-     * Download fetches the whole thing, keeps it, and leaves you where you
-     * are so you can queue up several and go and do something else. */
+    /* Download first, and it is the primary one.
+     *
+     * The other way round was the wrong default. Watching something as it
+     * arrives is only as good as the swarm: a release with one peer at
+     * 200 KB/s stutters, seeking crawls, and none of that is the player's
+     * doing or the player's to fix. Downloading it first takes as long as it
+     * takes, says so while it does, and then plays perfectly. That is the
+     * path most people want most of the time, so it is the one in front. */
     const save = document.createElement("button");
     save.type = "button";
-    save.className = "button-quiet";
+    save.className = "button-small";
     save.textContent = "Download";
     save.addEventListener("click", () => downloadTorrent(view.open, save));
 
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "button-quiet";
+    action.textContent = "Watch now";
+    action.title = "Starts at once, but only goes as fast as the swarm does";
+    action.addEventListener("click", () => openTorrent(view.open));
+
     const actions = document.createElement("span");
     actions.className = "result-actions";
-    actions.append(action, save);
+    actions.append(save, action);
 
     row.append(title, swarm, size, actions);
     el.resultList.append(row);
@@ -2116,7 +2127,17 @@ function openFromFragment() {
   return true;
 }
 
+/* Open on the shelf when there is anything on it.
+ *
+ * A television opens on what you were watching, not on a search box. Only when
+ * the shelf is empty is finding something the first thing you want, and then
+ * the search tab is the obvious front door. Decided after the first poll, so it
+ * is decided on fact rather than on a guess. */
 setMode("search");
+refresh().then(() => {
+  const shelf = el.downloadedList.childElementCount;
+  if (shelf > 0 && !window.location.hash) setMode("downloaded");
+});
 loadIndexes().then(loadFilters);
 loadCastBase();
 startPolling();
