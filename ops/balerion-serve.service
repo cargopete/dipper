@@ -48,7 +48,14 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX belongs here as much as the two obvious ones. Without it the NVIDIA
+# driver cannot initialise: `cuInit` returns CUDA_ERROR_OPERATING_SYSTEM, ffmpeg
+# reports "Error while opening encoder - maybe incorrect parameters such as
+# bit_rate, rate, width or height", and the player quietly falls back to
+# software for every segment it ever encodes. Nothing breaks, which is the
+# trouble: a machine with a perfectly good encoder in it does the whole job on
+# the CPU and only the journal knows.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # Where torrents live, and the only place this may write. `%h/.cache/balerion`
 # is where it puts them by default on Linux; add any `-o` directory here too or
 # the download fails with a permission error that looks like a disk fault.

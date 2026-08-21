@@ -91,15 +91,30 @@ if command -v loginctl >/dev/null 2>&1; then
     echo "note: could not enable lingering; the player will stop when you log out." >&2
 fi
 
+# Print the name rather than the number when there is one, because the cookie
+# the gate sets belongs to the host that set it. Open the link by IP and then
+# follow anything that spells the same machine by name and you arrive as a
+# stranger, holding a token filed under the other spelling. The search site
+# links by name, so the name is what has to be let in.
+REACH="$HOST"
+if command -v tailscale >/dev/null 2>&1; then
+  # `--peers=false` so the only DNSName in the document is this machine's;
+  # with peers in it the ordering is not something to rely on.
+  NAME="$(tailscale status --json --peers=false 2>/dev/null |
+    sed -n 's/.*"DNSName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  NAME="${NAME%.}"
+  [ -n "$NAME" ] && REACH="$NAME"
+fi
+
 echo
 echo "balerion-serve is running, bound to $HOST"
 echo
 echo "Open this once on each device that should be allowed in:"
 echo
-echo "  http://$HOST:8080/?balerion_token=$TOKEN"
+echo "  http://$REACH:8080/?balerion_token=$TOKEN"
 echo
-echo "It sets a cookie for a year. Requests from this machine are never asked."
-echo "Point the search site's BALERION_LOCAL_URL at http://$HOST:8080"
+echo "It sets a cookie for a year, for that spelling of this machine only."
+echo "Point the search site's BALERION_LOCAL_URL at http://$REACH:8080"
 echo
 echo "  systemctl --user status balerion-serve     what it is doing"
 echo "  journalctl --user -u balerion-serve -f     what it is saying"
