@@ -667,24 +667,27 @@ export default function Page() {
                               <span>{e.name}</span>
                               <span className="episode-date">{e.airdate ?? ""}</span>
                               <span className="row-actions">
+                                {/* Download first, and primary, exactly as on a
+                                    results row. The order was the other way
+                                    round here and nowhere else, which is the
+                                    sort of inconsistency that teaches somebody
+                                    the wrong habit on the screen they use most. */}
                                 <button
                                   type="button"
                                   className="button-small"
                                   disabled={picking === e.id}
-                                  onClick={() => playEpisode(e)}
+                                  onClick={() => playEpisode(e, { keep: true })}
                                 >
-                                  {picking === e.id ? "Finding" : "Play"}
+                                  {picking === e.id && keeping ? "Finding" : "Download"}
                                 </button>
-                                {/* The persistent half of the pair, same as on
-                                    a results row: pick the best release, fetch
-                                    all of it, and keep it. */}
                                 <button
                                   type="button"
                                   className="button-small quiet"
                                   disabled={picking === e.id}
-                                  onClick={() => playEpisode(e, { keep: true })}
+                                  onClick={() => playEpisode(e)}
+                                  title="Starts at once, but only goes as fast as the swarm does"
                                 >
-                                  Download
+                                  {picking === e.id && !keeping ? "Finding" : "Watch now"}
                                 </button>
                                 {/* For when you want to choose yourself. */}
                                 <button

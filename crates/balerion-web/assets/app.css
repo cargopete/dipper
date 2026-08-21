@@ -660,9 +660,9 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
 #file-list li { grid-template-columns: 1fr auto auto; }
 #library-list li { grid-template-columns: 1fr auto auto auto auto; }
 /* One column fewer: every row on the shelf is kept, so there is no badge. */
-/* The shelf carries a badge too now, because "ready" is the whole point of
-   having downloaded something. */
-#downloaded-list li { grid-template-columns: 1fr auto auto auto auto; }
+/* Four, not five: every row on the shelf is kept, so it carries no badge, and
+   the fifth track was sitting there empty. */
+#downloaded-list li { grid-template-columns: 1fr auto auto auto; }
 .badge-ready {
   border-color: color-mix(in oklab, var(--accent) 60%, transparent);
   color: var(--accent);
