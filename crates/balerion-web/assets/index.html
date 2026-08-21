@@ -35,7 +35,16 @@
               aria-controls="panel-search" data-mode="search">Search</button>
       <button type="button" role="tab" id="mode-link" aria-selected="false"
               aria-controls="panel-link" data-mode="link">Paste a link</button>
+      <!-- The other half of the pair. Watching borrows a copy and lets the
+           sweep take it back; downloading keeps one, and this is where the
+           kept ones live. -->
+      <button type="button" role="tab" id="mode-downloaded" aria-selected="false"
+              aria-controls="panel-downloaded" data-mode="downloaded">Downloaded</button>
     </div>
+
+    <!-- What a Download did. The viewer's own status line lives inside the
+         player, which is not on screen when you are still browsing. -->
+    <p class="hint" id="intake-status" role="status" hidden></p>
 
     <form id="search-form" role="tabpanel" aria-labelledby="mode-search" novalidate>
       <div class="search-row">
@@ -92,6 +101,15 @@
         An archive.org identifier skips that and fetches the torrent directly.
       </p>
     </form>
+
+    <section id="panel-downloaded" role="tabpanel" aria-labelledby="mode-downloaded" hidden>
+      <p class="hint" id="downloaded-empty">
+        Nothing kept yet. <strong>Download</strong> beside a result fetches the whole
+        thing and keeps it here until you delete it. <strong>Watch</strong> only borrows
+        a copy, and the sweep takes that one back once nobody is watching it.
+      </p>
+      <ul id="downloaded-list"></ul>
+    </section>
   </section>
 
   <!-- Things you are part way through. Drawn before the search results,

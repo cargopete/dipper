@@ -131,6 +131,7 @@ test("a verdict does not flap when the rate hovers at the threshold", () => {
   assert.equal(shouldChangeVerdict(false, true, 1.8), true);
 });
 
+
 /* The bug this exists to prevent: a phone handed a LAN address it cannot reach,
    fetching nothing and sitting at 0:00 with no error to show for it. */
 describe("mediaUrl", () => {
@@ -167,5 +168,40 @@ describe("mediaUrl", () => {
     assert.equal(lib.mediaUrl("/stream/abc/0", null, "127.0.0.1"), "/stream/abc/0");
     assert.equal(lib.mediaUrl("", CAST, "127.0.0.1"), "");
     assert.equal(lib.mediaUrl(null, CAST, "127.0.0.1"), null);
+  });
+});
+
+/* The false accusation this replaces: two different programmes whose first
+   episodes share a number, reported as duplicates, with an offer to delete
+   one of them. */
+describe("seriesOf", () => {
+  it("tells two programmes apart by more than the episode number", () => {
+    const saul = lib.seriesOf("www.UIndex.org    -    Better Call Saul S01E01 Uno 1080p WEB-DL");
+    const bad = lib.seriesOf("www.UIndex.org - Breaking.Bad.S01E01.Pilot.720p.HEVC.x265-MeGusta");
+    assert.equal(saul.tag, "S01E01");
+    assert.equal(bad.tag, "S01E01");
+    assert.notEqual(saul.key, bad.key, "different shows must not share a key");
+    assert.equal(saul.series, "better call saul");
+    assert.equal(bad.series, "breaking bad");
+  });
+
+  it("still groups two releases of the same episode", () => {
+    // Which is the case the warning exists for, and it must survive the fix.
+    const a = lib.seriesOf("www.UIndex.org    -    Better Call Saul S01E01 Uno 1080p WEB-DL");
+    const b = lib.seriesOf("Better.Call.Saul.S01E01.iNTERNAL.1080p.WEB.x264-GROUP");
+    assert.equal(a.key, b.key);
+  });
+
+  it("reads the other way of writing an episode number", () => {
+    assert.deepEqual(lib.seriesOf("The Wire 1x03 something"), {
+      series: "the wire",
+      tag: "S01E03",
+      key: "the wire|S01E03",
+    });
+  });
+
+  it("says nothing about a name with no episode in it", () => {
+    assert.equal(lib.seriesOf("0707_Atomic_Bomb_Blast_Effects"), null);
+    assert.equal(lib.seriesOf("Some Film 2024 1080p"), null);
   });
 });

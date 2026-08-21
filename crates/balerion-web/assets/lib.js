@@ -78,6 +78,35 @@ function episodeTagOf(name) {
   return `S${pad(m[1])}E${pad(m[2])}`;
 }
 
+/* Which programme, as well as which episode.
+ *
+ * `episodeTagOf` answers "S01E01" and nothing else, which is fine for labelling
+ * and wrong for grouping: Better Call Saul S01E01 and Breaking Bad S01E01 are
+ * not two copies of anything, and saying they are while offering to delete one
+ * is worse than saying nothing. So the title in front of the marker is taken
+ * too, with the index's own prefix and the usual dots and underscores rubbed
+ * off it.
+ *
+ * Approximate on purpose. It only has to be right often enough to stop a false
+ * accusation, and two releases of the same episode that spell the title
+ * differently are a missed warning rather than a wrong one. */
+function seriesOf(name) {
+  const tag = episodeTagOf(name);
+  if (!tag) return null;
+  const marker = /(?:^|[^a-z0-9])(?:s\d{1,2}[^a-z0-9]?e\d{1,3}|\d{1,2}x\d{1,3})(?![0-9])/i;
+  const at = marker.exec(name);
+  const before = at ? name.slice(0, at.index) : "";
+  const series = before
+    // "www.SomeIndex.org - " and friends, which say nothing about the show.
+    .replace(/^\s*(?:www\.)?[a-z0-9-]+\.(?:org|com|net|to|me|se|info)\s*[-–—:]?\s*/i, "")
+    // Scene names use dots and underscores where a person would use spaces.
+    .replace(/[._]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return { series, tag, key: `${series}|${tag}` };
+}
+
 /** Can this be watched as it downloads, at the rate the swarm is managing?
  *
  * `needed` and `rate` are both bytes per second. The margin exists because a
@@ -146,6 +175,7 @@ const BalerionLib = {
   seconds,
   roughly,
   episodeTagOf,
+  seriesOf,
   feasible,
   shouldChangeVerdict,
   mediaUrl,

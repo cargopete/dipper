@@ -87,13 +87,33 @@ h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.015em; }
   vertical-align: 0.06em;
 }
 
+/* Pushed right so the note and the shelf link read as one group on the far
+   side of the brand, rather than the note drifting into the middle. */
 .masthead-note {
-  margin: 0;
+  margin: 0 0 0 auto;
   font-family: var(--mono);
   font-size: 0.66rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--ink-faint);
+}
+
+.masthead-link {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  text-decoration: none;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 0.4rem);
+  transition: color 140ms ease, border-color 140ms ease;
+}
+.masthead-link:hover,
+.masthead-link:focus-visible {
+  color: var(--ink);
+  border-color: var(--ink-faint);
 }
 
 main {
@@ -592,6 +612,18 @@ ul.results li:nth-child(10) { animation-delay: 180ms; }
   .result-title { grid-area: title; }
   .result-swarm { grid-area: swarm; }
   .result-size { grid-area: size; }
+  /* The wrapper is the grid item, not the buttons inside it: naming the area
+     on `.button-small` placed nothing, because a button in the wrapper is not
+     a child of the grid. Two buttons got away with being auto-placed. Three
+     do not, so it is said explicitly, and allowed to wrap rather than push the
+     row wider than the screen. */
+  ul.results .row-actions {
+    grid-area: action;
+    justify-self: end;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
   ul.results .button-small { grid-area: action; justify-self: end; }
 
   /* Thumbs, not pointers. Anything under about 40px is a game of chance on a

@@ -144,6 +144,20 @@ fn describe(meta: &Metainfo, kept: bool) -> TorrentInfo {
 #[derive(Debug, Deserialize)]
 pub struct ResolveRequest {
     pub magnet: String,
+    /// Keep this one until it is explicitly deleted.
+    ///
+    /// The difference between the two ways in. Watching is ephemeral: the
+    /// torrent fetches what is ahead of the playhead and the sweep collects it
+    /// once nobody is watching. Downloading is not: it fetches the whole file,
+    /// writes the marker that survives a restart, and stays until somebody says
+    /// otherwise.
+    ///
+    /// Set here rather than by a second call to `/keep` afterwards, because
+    /// between those two calls the torrent is an ordinary unkept one, and a
+    /// sweep landing in that gap would collect the download somebody just
+    /// asked for.
+    #[serde(default)]
+    pub keep: bool,
 }
 
 /// Turn a pasted magnet into a running download.
@@ -162,6 +176,12 @@ pub async fn resolve(
     // of the same download on top of the first one's files.
     if let Some(existing) = state.get(&input.magnet().info_hash) {
         existing.touch();
+        // Watched first and downloaded afterwards is the ordinary way round:
+        // you start something, decide you want to keep it, and press Download
+        // while it is already running.
+        if request.keep && !existing.is_kept() {
+            make_kept(&existing).await;
+        }
         return Ok(Json(describe(&existing.meta, existing.is_kept())));
     }
 
@@ -203,7 +223,9 @@ pub async fn resolve(
         .await
         .map_err(|err| ApiError(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
 
-    let kept = crate::state::is_marked_kept(&root);
+    // Either it was marked kept on a previous run, or this request is the one
+    // asking for it.
+    let kept = request.keep || crate::state::is_marked_kept(&root);
     let started = torrent::start(
         meta,
         peers,
@@ -215,11 +237,19 @@ pub async fn resolve(
     .await?;
     started.set_kept(kept);
     if kept {
-        // Resuming something already marked for keeping: fetch the lot.
+        // Resuming something already marked for keeping, or downloading it for
+        // the first time: either way, fetch the lot rather than only what a
+        // playhead would need.
         started
             .handle
             .prioritise(vec![0..started.meta.piece_count()])
             .await;
+        if request.keep && let Err(err) = mark_kept(&root, true).await {
+            // Not fatal: the torrent is kept in memory either way, and the
+            // marker only matters across a restart. Worth saying so, because
+            // the symptom otherwise is a download quietly vanishing days later.
+            tracing::warn!(%err, "could not write the keep marker");
+        }
     }
 
     let info = describe(&started.meta, kept);
@@ -438,6 +468,25 @@ pub struct KeepRequest {
     pub keep: bool,
 }
 
+/// Turn a running torrent into a kept one: marker on disk, whole file wanted.
+///
+/// Shared by the `/keep` route and by a `Download` that arrives for something
+/// `Watch` already started, so the two ways of asking cannot drift apart.
+// One span covering every piece, not a range to be collected.
+#[allow(clippy::single_range_in_vec_init)]
+async fn make_kept(torrent: &Arc<crate::state::Torrent>) {
+    torrent.set_kept(true);
+    if let Err(err) = mark_kept(&torrent.root, true).await {
+        // Worth saying, not worth failing: the flag is still live in memory,
+        // it just will not survive a restart.
+        tracing::warn!(%err, "could not write the keep marker");
+    }
+    torrent
+        .handle
+        .prioritise(vec![0..torrent.meta.piece_count()])
+        .await;
+}
+
 /// Mark a torrent to survive the sweep, and fetch all of it rather than only
 /// what the playhead needs.
 // One span covering every piece, not a range to be collected.
@@ -452,17 +501,13 @@ pub async fn keep(
         .get(&hash)
         .ok_or_else(|| not_found("no such torrent"))?;
 
-    torrent.set_kept(request.keep);
-    if let Err(err) = mark_kept(&torrent.root, request.keep).await {
-        // Worth saying, not worth failing: the flag is still live in memory,
-        // it just will not survive a restart.
-        tracing::warn!(%err, "could not write the keep marker");
-    }
     if request.keep {
-        torrent
-            .handle
-            .prioritise(vec![0..torrent.meta.piece_count()])
-            .await;
+        make_kept(&torrent).await;
+    } else {
+        torrent.set_kept(false);
+        if let Err(err) = mark_kept(&torrent.root, false).await {
+            tracing::warn!(%err, "could not write the keep marker");
+        }
     }
     torrent.touch();
     Ok(Json(stats_for(&state, &hash, &torrent)))

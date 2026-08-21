@@ -54,6 +54,10 @@ const el = {
   castCopy: $("cast-copy"),
   library: $("library"),
   libraryList: $("library-list"),
+  intakeStatus: $("intake-status"),
+  downloadedPanel: $("panel-downloaded"),
+  downloadedList: $("downloaded-list"),
+  downloadedEmpty: $("downloaded-empty"),
   duplicates: $("duplicates"),
   peers: $("t-peers"),
   rate: $("t-rate"),
@@ -77,7 +81,7 @@ const audioQuery = () => (chosenAudio ? `?audio=${chosenAudio}` : "");
  * These live in lib.js, which is loaded first and has tests of its own. They
  * are the parts of this file that are only arithmetic, and they were the parts
  * with no way to run them outside a browser. */
-const { bytes, seconds, roughly, episodeTagOf, feasible, shouldChangeVerdict, mediaUrl } =
+const { bytes, seconds, roughly, episodeTagOf, seriesOf, feasible, shouldChangeVerdict, mediaUrl } =
   window.BalerionLib;
 
 function show(node, visible) {
@@ -1069,18 +1073,24 @@ function renderStats(stats) {
 function warnAboutDuplicates(all) {
   const groups = new Map();
   for (const item of all) {
-    const tag = episodeTagOf(item.name);
-    if (!tag) continue;
-    groups.set(tag, [...(groups.get(tag) ?? []), item]);
+    // By programme as well as by episode. Grouping on the tag alone made
+    // Better Call Saul S01E01 and Breaking Bad S01E01 into "2 copies of
+    // S01E01", and then offered to delete one of them.
+    const which = seriesOf(item.name);
+    if (!which) continue;
+    groups.set(which.key, {
+      label: which.series ? `${which.series} ${which.tag}` : which.tag,
+      items: [...(groups.get(which.key)?.items ?? []), item],
+    });
   }
-  const duplicated = [...groups.entries()].filter(([, items]) => items.length > 1);
+  const duplicated = [...groups.values()].filter(({ items }) => items.length > 1);
   if (duplicated.length === 0) {
     show(el.duplicates, false);
     return;
   }
 
   const said = duplicated
-    .map(([tag, items]) => `${items.length} copies of ${tag}`)
+    .map(({ label, items }) => `${items.length} copies of ${label}`)
     .join(", ");
   const peers = all.reduce((total, item) => total + item.peers, 0);
   el.duplicates.textContent =
@@ -1090,60 +1100,89 @@ function warnAboutDuplicates(all) {
   show(el.duplicates, true);
 }
 
-function renderLibrary(all) {
-  show(el.library, all.length > 0);
-  warnAboutDuplicates(all);
-  el.libraryList.replaceChildren();
+/* One row of a torrent list.
+ *
+ * Shared by "On this machine", which shows everything the server is holding,
+ * and by the Downloaded shelf, which shows only the kept ones. Written once
+ * because two copies of "what a torrent looks like in a list" is two things to
+ * remember to change. `withBadge` is the only difference worth having: on the
+ * shelf every row is kept, and a column that reads "kept" all the way down
+ * says nothing. */
+function libraryRow(item, { withBadge = true } = {}) {
+  const row = document.createElement("li");
 
-  for (const item of all) {
-    const row = document.createElement("li");
+  const name = document.createElement("span");
+  name.textContent = item.name;
 
-    const name = document.createElement("span");
-    name.textContent = item.name;
+  const size = document.createElement("span");
+  size.className = "library-size";
+  const percent = item.pieces_total
+    ? Math.floor((item.pieces_have / item.pieces_total) * 100)
+    : 0;
+  size.textContent = item.complete
+    ? bytes(item.total_length)
+    : `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
 
-    const size = document.createElement("span");
-    size.className = "library-size";
-    const percent = item.pieces_total
-      ? Math.floor((item.pieces_have / item.pieces_total) * 100)
-      : 0;
-    size.textContent = item.complete
-      ? bytes(item.total_length)
-      : `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
+  // Reopen something already on disk. Resolving by infohash finds the
+  // running session rather than starting a second one, so a part-finished
+  // torrent carries on downloading from where it stopped.
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "button-small";
+  open.textContent = item.complete ? "Watch" : "Resume";
+  open.addEventListener("click", () => openTorrent(item.infohash));
 
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button-quiet";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", async () => {
+    if (!window.confirm(`Delete ${item.name} and its files from disk?`)) return;
+    await api(`/api/torrents/${item.infohash}`, { method: "DELETE" });
+    if (current && current.infohash === item.infohash) {
+      show(el.torrent, false);
+      teardown();
+      el.video.removeAttribute("src");
+      el.video.load();
+      current = null;
+      playing = null;
+    }
+    refresh();
+  });
+
+  if (withBadge) {
     const badge = document.createElement("span");
     badge.className = item.kept ? "badge badge-kept" : "badge";
     badge.textContent = item.kept ? "kept" : "temporary";
-
-    // Reopen something already on disk. Resolving by infohash finds the
-    // running session rather than starting a second one, so a part-finished
-    // torrent carries on downloading from where it stopped.
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "button-small";
-    open.textContent = item.complete ? "Watch" : "Resume";
-    open.addEventListener("click", () => openTorrent(item.infohash));
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "button-quiet";
-    remove.textContent = "Delete";
-    remove.addEventListener("click", async () => {
-      if (!window.confirm(`Delete ${item.name} and its files from disk?`)) return;
-      await api(`/api/torrents/${item.infohash}`, { method: "DELETE" });
-      if (current && current.infohash === item.infohash) {
-        show(el.torrent, false);
-        teardown();
-        el.video.removeAttribute("src");
-        el.video.load();
-        current = null;
-        playing = null;
-      }
-      refresh();
-    });
-
     row.append(name, size, badge, open, remove);
-    el.libraryList.append(row);
+  } else {
+    row.append(name, size, open, remove);
   }
+  return row;
+}
+
+function renderLibrary(all) {
+  // Remembered, because `setMode` needs to know whether there is anything to
+  // show without going back to the server for it.
+  el.library.dataset.empty = all.length === 0 ? "yes" : "";
+  show(el.library, all.length > 0 && el.downloadedPanel.hidden);
+  warnAboutDuplicates(all);
+  el.libraryList.replaceChildren(...all.map((item) => libraryRow(item)));
+}
+
+/* What was downloaded rather than borrowed.
+ *
+ * Finished first, then whatever is still arriving, and alphabetical within
+ * each: the point of the shelf is "what can I watch right now", and something
+ * at 12% is not an answer to that however recently it was asked for. */
+function renderDownloaded(all) {
+  const kept = all
+    .filter((item) => item.kept)
+    .sort((a, b) => Number(b.complete) - Number(a.complete) || a.name.localeCompare(b.name));
+  show(el.downloadedEmpty, kept.length === 0);
+  el.downloadedList.replaceChildren(
+    ...kept.map((item) => libraryRow(item, { withBadge: false })),
+  );
 }
 
 /* ---- carry on watching --------------------------------------------------
@@ -1207,6 +1246,7 @@ async function refresh() {
   try {
     const all = await api("/api/torrents");
     renderLibrary(all);
+    renderDownloaded(all);
     if (current) {
       const mine = all.find((item) => item.infohash === current.infohash);
       if (mine) renderStats(mine);
@@ -1403,6 +1443,15 @@ function setMode(mode) {
   }
   show(el.searchForm, mode === "search");
   show(el.form, mode === "link");
+  show(el.downloadedPanel, mode === "downloaded");
+  /* The shelf is a strict subset of "On this machine", so drawing both at once
+     shows the same row twice with a badge to tell you they are the same thing.
+     The full list is a click away on either of the other tabs. */
+  show(el.library, mode !== "downloaded" && !el.library.dataset.empty);
+  // The shelf is drawn from the last poll, which on a cold page has not
+  // happened yet. Asking now means the tab is never briefly empty when it
+  // should not be.
+  if (mode === "downloaded") refresh();
 }
 
 /* Ask the server which indexes it can reach, and add the ones this page does
@@ -1590,8 +1639,61 @@ function renderResults(data) {
     action.textContent = "Watch";
     action.addEventListener("click", () => openTorrent(view.open));
 
-    row.append(title, swarm, size, action);
+    /* The persistent way in. Watch borrows a copy and opens the player;
+     * Download fetches the whole thing, keeps it, and leaves you where you
+     * are so you can queue up several and go and do something else. */
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "button-quiet";
+    save.textContent = "Download";
+    save.addEventListener("click", () => downloadTorrent(view.open, save));
+
+    const actions = document.createElement("span");
+    actions.className = "result-actions";
+    actions.append(action, save);
+
+    row.append(title, swarm, size, actions);
     el.resultList.append(row);
+  }
+}
+
+/** A line under the tabs, for things that happen while you are still browsing. */
+function sayInIntake(message) {
+  el.intakeStatus.textContent = message;
+  show(el.intakeStatus, Boolean(message));
+}
+
+/* Start something and keep it, without taking over the page.
+ *
+ * Deliberately not `openTorrent` with a flag. Watching is a thing you do now,
+ * so it is worth clearing the screen for; downloading is a thing you will do
+ * later, and a viewer that appears over the results you were still reading is
+ * an answer to a question nobody asked. The button reports on itself instead,
+ * and the Downloaded tab is where it ends up.
+ *
+ * Resolving a cold magnet takes tens of seconds, so the button is disabled
+ * throughout: two clicks would be two `/api/resolve` calls for the same
+ * infohash, and while the second is harmless it looks like nothing happened. */
+async function downloadTorrent(what, button) {
+  const said = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Starting";
+  }
+  try {
+    const info = await api("/api/resolve", json({ magnet: what, keep: true }));
+    if (button) button.textContent = "Downloading";
+    sayInIntake(
+      `${info.name} is downloading and will be kept. It is under Downloaded, ` +
+      `and you can watch it before it finishes.`,
+    );
+    refresh();
+  } catch (err) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = said ?? "Download";
+    }
+    sayInIntake(`That would not start: ${err.message ?? err}`);
   }
 }
 
@@ -1828,6 +1930,15 @@ function openFromFragment() {
   if (!fragment) return false;
 
   const params = new URLSearchParams(fragment);
+
+  /* `#downloaded` on its own: the search site's shelf link, which is a link to
+   * this tab rather than to any particular thing. */
+  if (!params.get("magnet") && params.has("downloaded")) {
+    history.replaceState(null, "", window.location.pathname);
+    setMode("downloaded");
+    return true;
+  }
+
   const magnet = params.get("magnet");
   if (!magnet) return false;
   // Other releases of the same thing, in the order whoever sent us here ranked
@@ -1835,6 +1946,16 @@ function openFromFragment() {
   const alternatives = params.getAll("alt");
 
   history.replaceState(null, "", window.location.pathname);
+
+  /* The two paths, arriving from elsewhere. `keep=1` is the search site's
+   * Download button: fetch the whole thing, keep it, and show the shelf it
+   * landed on rather than a player nobody asked for. */
+  if (params.get("keep") === "1") {
+    setMode("downloaded");
+    downloadTorrent(magnet, null);
+    return true;
+  }
+
   setMode("link");
   el.magnet.value = magnet;
   openTorrent(magnet, alternatives);

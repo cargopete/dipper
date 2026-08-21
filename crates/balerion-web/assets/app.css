@@ -375,7 +375,7 @@ label {
   color: var(--ink-soft);
 }
 
-#result-list, #file-list, #library-list {
+#result-list, #file-list, #library-list, #downloaded-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -395,6 +395,16 @@ label {
 }
 #result-list li:last-child { border-bottom: 0; }
 #result-list li:hover { background: var(--panel-high); }
+
+/* Watch and Download sit in the single action column rather than each taking
+   one of their own, so a row with two buttons still lines its title, swarm and
+   size up with a row that only ever had one. */
+.result-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
 
 .result-title { font-size: 0.93rem; overflow-wrap: anywhere; }
 .result-meta {
@@ -610,7 +620,7 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
   margin-bottom: 0.3rem;
 }
 
-#file-list li, #library-list li {
+#file-list li, #library-list li, #downloaded-list li {
   display: grid;
   align-items: center;
   gap: 1rem;
@@ -620,7 +630,10 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
 }
 #file-list li { grid-template-columns: 1fr auto auto; }
 #library-list li { grid-template-columns: 1fr auto auto auto auto; }
-#file-list li:last-child, #library-list li:last-child { border-bottom: 0; }
+/* One column fewer: every row on the shelf is kept, so there is no badge. */
+#downloaded-list li { grid-template-columns: 1fr auto auto auto; }
+#file-list li:last-child, #library-list li:last-child,
+#downloaded-list li:last-child { border-bottom: 0; }
 
 .file-name { overflow-wrap: anywhere; }
 .file-name.playing { color: var(--accent); }

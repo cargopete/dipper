@@ -81,7 +81,12 @@ const DEFAULT_LOCAL = "http://127.0.0.1:8080";
  * The magnet goes in the fragment rather than the query so it never leaves the
  * browser: not into that server's log, not into a proxy's, not into a Referer.
  */
-function watchHere(base: string, open: string, alternatives: string[] = []): string {
+function watchHere(
+  base: string,
+  open: string,
+  alternatives: string[] = [],
+  { keep = false }: { keep?: boolean } = {},
+): string {
   /* Guarded, because an unusable base produces a link that looks fine and does
      something quite different. With an empty base this built "/#magnet=...",
      which is a fragment on *this* page: clicking it scrolls to the top and
@@ -89,7 +94,35 @@ function watchHere(base: string, open: string, alternatives: string[] = []): str
   const trimmed = base.trim().replace(/\/+$/, "");
   const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
   const alt = alternatives.map((m) => `&alt=${encodeURIComponent(m)}`).join("");
-  return `${usable}/#magnet=${encodeURIComponent(open)}${alt}`;
+  /* The persistent path. Watching borrows a copy and lets Balerion's sweep take
+     it back once nobody is looking; keeping fetches the whole thing and holds it
+     until it is deleted by hand. Same link, one flag apart, because they are the
+     same journey with a different ending. */
+  const intent = keep ? "&keep=1" : "";
+  return `${usable}/#magnet=${encodeURIComponent(open)}${alt}${intent}`;
+}
+
+/** The shelf of what has been kept, which only Balerion itself knows about. */
+function shelfHere(base: string): string {
+  const trimmed = base.trim().replace(/\/+$/, "");
+  const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
+  return `${usable}/#downloaded`;
+}
+
+/* A synopsis cut to length without cutting a word in half.
+ *
+ * A hard `slice` left Better Call Saul's description ending "hustling to make
+ * ends meet. Wor", which reads as a bug rather than as an abridgement. Back up
+ * to the last space and say plainly that there is more. */
+function trimmed(text: string, limit: number): string {
+  const clean = text.trim();
+  if (clean.length <= limit) return clean;
+  const cut = clean.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  // No space at all in 320 characters is not a sentence; leave it be rather
+  // than returning nothing.
+  const kept = space > limit * 0.6 ? cut.slice(0, space) : cut;
+  return `${kept.replace(/[\s.,;:]+$/, "")}\u2026`;
 }
 
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -196,6 +229,9 @@ export default function Page() {
      visible rather than silent, because something that chooses for you and will
      not say what it chose is worse than a list. */
   const [picking, setPicking] = useState<number | null>(null);
+  /* Which of the two buttons started the pick, so the note underneath says
+     what is about to happen rather than guessing. */
+  const [keeping, setKeeping] = useState(false);
   const [picked, setPicked] = useState<{ episode: Episode; choice: Pick } | null>(null);
   /* Remembered per browser rather than configured on the server: it describes
      the machine you are sitting at, and the server has no business knowing it. */
@@ -306,8 +342,9 @@ export default function Page() {
      The choosing is arithmetic rather than taste: a release streams if the swarm
      can carry its bitrate, and its bitrate is its size over the episode's
      runtime, which the catalogue knows. */
-  async function playEpisode(episode: Episode) {
+  async function playEpisode(episode: Episode, { keep = false } = {}) {
     if (!openShow) return;
+    setKeeping(keep);
     setPicking(episode.id);
     setPicked(null);
     setError(null);
@@ -320,8 +357,10 @@ export default function Page() {
       const body = await response.json();
       if (!response.ok) throw new Error(body?.error ?? `${response.status}`);
       setPicked({ episode, choice: body as Pick });
-      // Straight to the player, which resolves and starts on its own.
-      window.open(watchHere(local, body.magnet, body.alternatives ?? []), "balerion");
+      /* Straight to the player, which resolves and starts on its own. The
+         same journey either way: `keep` is the difference between borrowing a
+         copy and being given one. */
+      window.open(watchHere(local, body.magnet, body.alternatives ?? [], { keep }), "balerion");
     } catch (err) {
       setError(err instanceof Error ? err.message : "could not find anything to play");
     } finally {
@@ -450,6 +489,12 @@ export default function Page() {
       <header className="masthead">
         <p className="brand">BALERION</p>
         <p className="masthead-note">search only</p>
+        {/* Not a third tab: the other two switch panels on this page, and this
+            one leaves it. Everything downloaded lives on the machine running
+            Balerion, which is the only thing that knows what is on the shelf. */}
+        <a className="masthead-link" href={shelfHere(local)} target="balerion">
+          Downloaded
+        </a>
       </header>
 
       <main>
@@ -517,7 +562,7 @@ export default function Page() {
                       .join("  /  ")}
                   </p>
                   {openShow.summary ? (
-                    <p className="show-summary">{openShow.summary.slice(0, 320)}</p>
+                    <p className="show-summary">{trimmed(openShow.summary, 320)}</p>
                   ) : null}
 
                   {episodeList === null ? (
@@ -554,7 +599,9 @@ export default function Page() {
                           seeders, needs {picked.choice.rate}.
                           {picked.choice.overBudget
                             ? " Nothing found fits a thin line, so this is the smallest there was and it may stall."
-                            : " Opening it in the player."}
+                            : keeping
+                              ? " Downloading it and keeping it."
+                              : " Opening it in the player."}
                         </p>
                       ) : null}
 
@@ -574,6 +621,17 @@ export default function Page() {
                                   onClick={() => playEpisode(e)}
                                 >
                                   {picking === e.id ? "Finding" : "Play"}
+                                </button>
+                                {/* The persistent half of the pair, same as on
+                                    a results row: pick the best release, fetch
+                                    all of it, and keep it. */}
+                                <button
+                                  type="button"
+                                  className="button-small quiet"
+                                  disabled={picking === e.id}
+                                  onClick={() => playEpisode(e, { keep: true })}
+                                >
+                                  Download
                                 </button>
                                 {/* For when you want to choose yourself. */}
                                 <button
@@ -779,6 +837,16 @@ export default function Page() {
                         title={`Opens ${watchHere(local, row.copy ?? "")}`}
                       >
                         Watch
+                      </a>
+                      {/* Same tab as Watch, so queueing several downloads does
+                          not leave a trail of Balerion windows behind. */}
+                      <a
+                        className="button-small quiet"
+                        href={watchHere(local, row.copy ?? "", [], { keep: true })}
+                        target="balerion"
+                        title="Fetch the whole thing and keep it until you delete it"
+                      >
+                        Download
                       </a>
                       <button
                         type="button"
