@@ -102,6 +102,49 @@ function watchHere(
   return `${usable}/#magnet=${encodeURIComponent(open)}${alt}${intent}`;
 }
 
+/* Claim a window while the tap is still a tap, and put something in it.
+ *
+ * An empty window is only marginally better than no window: it reads as a page
+ * that failed to load. It gets a line of text in the same palette, so the
+ * seconds spent asking apibay which release to fetch look like waiting rather
+ * than like breakage. */
+function openWaitingWindow(): Window | null {
+  let claimed: Window | null = null;
+  try {
+    claimed = window.open("", "balerion");
+  } catch {
+    return null;
+  }
+  try {
+    claimed?.document.write(
+      '<!doctype html><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+        "<title>Balerion</title>" +
+        '<body style="margin:0;display:grid;place-items:center;min-height:100vh;' +
+        "background:#171614;color:#9c978c;font:15px/1.5 ui-sans-serif,system-ui,sans-serif\">" +
+        '<p style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.7rem;' +
+        'letter-spacing:.14em;text-transform:uppercase;color:#cd8560">Finding a release</p>',
+    );
+  } catch {
+    // Cross-origin or a browser that will not have it written into. The window
+    // is still claimed, which is the part that matters.
+  }
+  return claimed;
+}
+
+/* Send the claimed window somewhere, or fall back to this one.
+ *
+ * The fallback matters. If the window was blocked anyway, or the browser has
+ * no notion of named windows, navigating here is worse than a new tab but
+ * infinitely better than the button doing nothing, which is what it did. */
+function handOver(url: string, waiting: Window | null) {
+  if (waiting && !waiting.closed) {
+    waiting.location.href = url;
+    return;
+  }
+  window.location.href = url;
+}
+
 /** The shelf of what has been kept, which only Balerion itself knows about. */
 function shelfHere(base: string): string {
   const trimmed = base.trim().replace(/\/+$/, "");
@@ -348,6 +391,15 @@ export default function Page() {
     setPicking(episode.id);
     setPicked(null);
     setError(null);
+    /* Claimed now, while the click is still a click.
+     *
+     * Which release to fetch is not known until apibay has been asked, and by
+     * the time that answers the user gesture has expired. A browser will not
+     * open a window for code that is no longer plainly acting on a tap, and a
+     * phone will not even say so: the button flickers, nothing opens, and
+     * nothing arrives. Opening it empty first and pointing it somewhere later
+     * is the only version of this that works on a phone. */
+    const waiting = openWaitingWindow();
     try {
       const query = new URLSearchParams({
         q: apibayQuery(openShow, episode.tag),
@@ -360,8 +412,9 @@ export default function Page() {
       /* Straight to the player, which resolves and starts on its own. The
          same journey either way: `keep` is the difference between borrowing a
          copy and being given one. */
-      window.open(watchHere(local, body.magnet, body.alternatives ?? [], { keep }), "balerion");
+      handOver(watchHere(local, body.magnet, body.alternatives ?? [], { keep }), waiting);
     } catch (err) {
+      waiting?.close();
       setError(err instanceof Error ? err.message : "could not find anything to play");
     } finally {
       setPicking(null);
