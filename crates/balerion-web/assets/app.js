@@ -56,6 +56,7 @@ const el = {
   libraryList: $("library-list"),
   intakeStatus: $("intake-status"),
   downloadedPanel: $("panel-downloaded"),
+  startingList: $("starting-list"),
   downloadedList: $("downloaded-list"),
   downloadedEmpty: $("downloaded-empty"),
   duplicates: $("duplicates"),
@@ -1338,7 +1339,7 @@ function renderDownloaded(all) {
   const kept = all
     .filter((item) => item.kept)
     .sort((a, b) => Number(b.complete) - Number(a.complete) || a.name.localeCompare(b.name));
-  show(el.downloadedEmpty, kept.length === 0);
+  show(el.downloadedEmpty, kept.length === 0 && starting.size === 0);
   el.downloadedList.replaceChildren(
     ...kept.map((item) => libraryRow(item, { withBadge: false })),
   );
@@ -1349,6 +1350,14 @@ function renderDownloaded(all) {
  * On most evenings this is the answer to "what shall we watch", so it is drawn
  * above the search rather than below the library. Things watched to the end are
  * not here: the row is for what you are part way through. */
+let continuingCount = 0;
+let currentMode = "search";
+
+/** Whether the continue row belongs on screen right now. */
+function showContinuing() {
+  show(el.continuing, currentMode !== "downloaded" && continuingCount > 0);
+}
+
 async function renderContinuing() {
   let items;
   try {
@@ -1357,7 +1366,13 @@ async function renderContinuing() {
     return;
   }
 
-  show(el.continuing, items.length > 0);
+  /* Held on to, so `setMode` can decide whether this belongs on screen without
+     asking the server again. Not shown while the shelf is open: it is drawn
+     from watch history, which outlives the files, and two entries for things
+     no longer on the machine sitting under an empty shelf reads as the shelf
+     being broken. */
+  continuingCount = items.length;
+  showContinuing();
   el.continuingList.replaceChildren();
 
   for (const item of items) {
@@ -1603,6 +1618,11 @@ function setMode(mode) {
   show(el.searchForm, mode === "search");
   show(el.form, mode === "link");
   show(el.downloadedPanel, mode === "downloaded");
+  /* Not on the shelf. It is drawn from watch history, which outlives the files,
+     so it happily shows two things that are no longer on the machine, directly
+     under a shelf that is empty. That reads as the shelf being wrong. */
+  currentMode = mode;
+  showContinuing();
   /* The shelf is a strict subset of "On this machine", so drawing both at once
      shows the same row twice with a badge to tell you they are the same thing.
      The full list is a click away on either of the other tabs. */
@@ -1839,14 +1859,28 @@ function sayInIntake(message) {
  * Resolving a cold magnet takes tens of seconds, so the button is disabled
  * throughout: two clicks would be two `/api/resolve` calls for the same
  * infohash, and while the second is harmless it looks like nothing happened. */
+/* What has been asked for but has not appeared yet.
+ *
+ * Resolving a cold magnet means asking the swarm for a file list, which takes
+ * tens of seconds and sometimes a minute and a half. Until that answers there
+ * is no torrent, so the shelf has nothing to draw, so pressing Download and
+ * arriving at an empty shelf is the correct behaviour and a terrible one: it
+ * is indistinguishable from the button not having worked.
+ *
+ * So the row appears the moment you press it, and says what it is doing. */
+const starting = new Map();
+
 async function downloadTorrent(what, button) {
   const said = button?.textContent;
   if (button) {
     button.disabled = true;
     button.textContent = "Starting";
   }
+  starting.set(what, { asked: what, since: Date.now(), failed: null });
+  renderStarting();
   try {
     const info = await api("/api/resolve", json({ magnet: what, keep: true }));
+    starting.delete(what);
     if (button) button.textContent = "Downloading";
     sayInIntake(
       `${info.name} is downloading and will be kept. It is under Downloaded, ` +
@@ -1854,11 +1888,52 @@ async function downloadTorrent(what, button) {
     );
     refresh();
   } catch (err) {
+    // Left on the shelf rather than removed, carrying the reason. A row that
+    // vanishes on failure is the silent version of this bug all over again.
+    const held = starting.get(what);
+    if (held) held.failed = err.message ?? String(err);
+    renderStarting();
     if (button) {
       button.disabled = false;
       button.textContent = said ?? "Download";
     }
     sayInIntake(`That would not start: ${err.message ?? err}`);
+  }
+}
+
+/** Draw the rows for things asked for but not yet arrived. */
+function renderStarting() {
+  el.startingList.replaceChildren();
+  show(el.startingList, starting.size > 0);
+  for (const [key, item] of starting) {
+    const row = document.createElement("li");
+
+    const name = document.createElement("span");
+    // A magnet is not a name. Until the swarm says otherwise, the display name
+    // out of the link is the best there is, and an infohash after that.
+    const shown = decodeURIComponent(key).match(/[?&]dn=([^&]+)/);
+    name.textContent = shown
+      ? decodeURIComponent(shown[1]).replace(/\+/g, " ")
+      : `${key.slice(0, 40)}…`;
+
+    const state = document.createElement("span");
+    state.className = item.failed ? "library-size state-failed" : "library-size state-downloading";
+    state.textContent = item.failed
+      ? item.failed
+      : "asking the swarm for the file list";
+
+    const give = document.createElement("button");
+    give.type = "button";
+    give.className = "button-quiet";
+    give.textContent = item.failed ? "Try again" : "Give up";
+    give.addEventListener("click", () => {
+      starting.delete(key);
+      renderStarting();
+      if (item.failed) downloadTorrent(key, null);
+    });
+
+    row.append(name, state, give);
+    el.startingList.append(row);
   }
 }
 

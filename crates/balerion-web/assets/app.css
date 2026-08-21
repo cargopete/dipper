@@ -941,3 +941,18 @@ a:hover { color: var(--rust); }
 /* The badge at rest, before it has anything to report. */
 .badge { color: var(--text-faint); }
 .badge-temporary { color: var(--rust); }
+
+/* Rows for something asked for but not yet arrived. Same shape as the shelf so
+   the list does not jump when one becomes the other. */
+#starting-list { list-style: none; margin: 0; padding: 0; }
+#starting-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.87rem;
+}
+#starting-list li:last-child { border-bottom: 0; }
+.state-failed { color: var(--warn); }

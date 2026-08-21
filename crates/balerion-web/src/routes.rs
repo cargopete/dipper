@@ -170,6 +170,14 @@ pub async fn resolve(
     // The clock starts when the viewer asks, not when the download does: the
     // wait they actually experience includes everything before the first byte.
     let clock = Arc::new(crate::state::Clock::started(std::time::Instant::now()));
+    // Said out loud because "I pressed Download and nothing happened" is
+    // otherwise indistinguishable between a click that never arrived, a magnet
+    // that would not parse, and a swarm that would not answer.
+    tracing::info!(
+        keep = request.keep,
+        asked = request.magnet.chars().take(72).collect::<String>(),
+        "asked to resolve"
+    );
     let input = torrent::parse_input(&request.magnet, &state.sources.ia).await?;
 
     // Already going? Hand back what we have rather than starting a second copy
