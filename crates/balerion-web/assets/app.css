@@ -631,7 +631,13 @@ video { width: 100%; max-height: 70vh; display: block; background: #000; }
 #file-list li { grid-template-columns: 1fr auto auto; }
 #library-list li { grid-template-columns: 1fr auto auto auto auto; }
 /* One column fewer: every row on the shelf is kept, so there is no badge. */
-#downloaded-list li { grid-template-columns: 1fr auto auto auto; }
+/* The shelf carries a badge too now, because "ready" is the whole point of
+   having downloaded something. */
+#downloaded-list li { grid-template-columns: 1fr auto auto auto auto; }
+.badge-ready {
+  border-color: color-mix(in oklab, var(--accent) 60%, transparent);
+  color: var(--accent);
+}
 #file-list li:last-child, #library-list li:last-child,
 #downloaded-list li:last-child { border-bottom: 0; }
 

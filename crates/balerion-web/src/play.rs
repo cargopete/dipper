@@ -147,6 +147,44 @@ pub async fn info(
     let classified = media::classify(&entry.path);
     let mut tracks = sidecar_tracks(&torrent, file, &hash);
 
+    /* Converted up front, so there is nothing left to do but serve it.
+     *
+     * This is the whole point of keeping something. A transcoded file is
+     * encoded six seconds at a time as it is asked for, which means the first
+     * frame costs a second and every seek costs four; a converted one is an
+     * ordinary MP4, so it starts at once, seeks to the exact frame, and has an
+     * address a television can simply fetch. Same file, same subtitles, a
+     * different class of experience.
+     */
+    if let Some(prepared) = crate::convert::ready(&torrent.root, file) {
+        /* The subtitles that were inside the original.
+         *
+         * Converting keeps the picture and the sound and drops everything
+         * else, which is right for a file a television has to open, and would
+         * be wrong for the viewer if it stopped there: an episode that had
+         * subtitles before it was prepared must still have them after. They are
+         * pulled out of the *source* on demand, exactly as they were on the
+         * transcoded path, and offered beside the prepared file. */
+        if let Some(tools) = state.tools.clone()
+            && let Ok(probe) = state.probe(&tools, &info_hash, file).await
+        {
+            tracks.extend(embedded_tracks(&probe, &hash, file));
+        }
+        let subtitles_pending =
+            add_fetched_track(&state, &info_hash, file, &hash, &mut tracks).await;
+        let length = tokio::fs::metadata(&prepared)
+            .await
+            .map(|meta| meta.len())
+            .unwrap_or(entry.length);
+        return Ok(Json(PlayInfo::Direct {
+            url: format!("/ready/{hash}/{file}"),
+            resume_at: state.history.get(&hash, file).and_then(|at| at.resume_at()),
+            length,
+            tracks,
+            subtitles_pending,
+        }));
+    }
+
     // The cheap path, and the common one.
     if classified.playback == Playback::Native {
         let subtitles_pending =

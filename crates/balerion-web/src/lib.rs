@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod cast;
+pub mod convert;
 pub mod fetched;
 pub mod ffmpeg;
 pub mod find;
@@ -107,6 +108,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/torrents/{hash}", delete(routes::remove))
         .route("/api/torrents/{hash}/keep", post(routes::keep))
         .route("/stream/{hash}/{file}", get(stream::handler))
+        // A file that was converted up front, served as an ordinary file.
+        .route("/ready/{hash}/{file}", get(convert::serve))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             access::guard,

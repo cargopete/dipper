@@ -545,6 +545,7 @@ async function play(index) {
   // means nothing here.
   if (playing !== index) chosenAudio = 0;
   playing = index;
+  describeToTheSystem(file);
   playInfo = null;
   forgetRates();
   show(el.advisory, false);
@@ -650,6 +651,142 @@ async function play(index) {
 
   await startTranscode(info);
   resumeIfAsked(info);
+}
+
+/* ---- what the phone shows when the screen is off -------------------------
+ *
+ * The Media Session API is the difference between "a web page that happens to
+ * be playing audio" and something that behaves like a television. It puts the
+ * title on the lock screen, in the notification shade and on a watch, and it
+ * routes the hardware buttons — headphone pause, car stereo skip — at the page
+ * instead of at nothing.
+ *
+ * Cheap, standard, and supported by every phone browser worth the name. The
+ * only reason it is not everywhere is that it is easy not to know about. */
+
+/** A programme and an episode, out of the sort of name a release has. */
+function nowPlaying(file) {
+  if (!file) return { title: "Balerion", subtitle: "" };
+  const tag =
+    file.season !== null && file.season !== undefined && file.episode !== null
+      ? `S${String(file.season).padStart(2, "0")}E${String(file.episode).padStart(2, "0")}`
+      : "";
+  /* The file's own name, tidied: scene releases are dot-separated and carry a
+     tail of tags nobody wants read out on a lock screen. */
+  const bare = (file.name || "").replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[._]+/g, " ");
+  const cut = bare.search(/\b(?:\d{3,4}p|WEB[- ]?DL|WEBRip|BluRay|HDTV|x26[45]|HEVC|DDP?5)\b/i);
+  const title = (cut > 0 ? bare.slice(0, cut) : bare).trim() || file.name || "Balerion";
+  return { title, subtitle: tag };
+}
+
+/** Tell the phone what is playing, and which buttons should do what. */
+function describeToTheSystem(file) {
+  if (!("mediaSession" in navigator)) return;
+  const { title, subtitle } = nowPlaying(file);
+  try {
+    navigator.mediaSession.metadata = new window.MediaMetadata({
+      title,
+      artist: subtitle,
+      album: current ? current.name : "",
+    });
+  } catch {
+    // An older browser with the object but not the constructor. The handlers
+    // below are the useful half anyway.
+  }
+
+  const jump = (by) => {
+    if (!Number.isFinite(el.video.duration)) return;
+    el.video.currentTime = Math.min(
+      Math.max(el.video.currentTime + by, 0),
+      el.video.duration,
+    );
+  };
+  const handlers = {
+    play: () => el.video.play().catch(() => {}),
+    pause: () => el.video.pause(),
+    // Ten and thirty, which is what every television remote does.
+    seekbackward: (details) => jump(-(details?.seekOffset || 10)),
+    seekforward: (details) => jump(details?.seekOffset || 30),
+    seekto: (details) => {
+      if (details && Number.isFinite(details.seekTime)) el.video.currentTime = details.seekTime;
+    },
+    nexttrack: () => {
+      const ordered = playableInOrder();
+      const at = ordered.findIndex((one) => one.index === playing);
+      const next = at === -1 ? null : ordered[at + 1];
+      if (next) play(next.index);
+    },
+    previoustrack: () => {
+      const ordered = playableInOrder();
+      const at = ordered.findIndex((one) => one.index === playing);
+      const before = at > 0 ? ordered[at - 1] : null;
+      if (before) play(before.index);
+    },
+  };
+  for (const [action, handler] of Object.entries(handlers)) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // Not every browser knows every action, and refusing one must not stop
+      // the rest being registered.
+    }
+  }
+}
+
+/** Keep the lock screen's scrubber honest. */
+function tellTheSystemWhereWeAre() {
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  const duration = el.video.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration,
+      playbackRate: el.video.playbackRate || 1,
+      position: Math.min(Math.max(el.video.currentTime, 0), duration),
+    });
+  } catch {
+    // Throws if position exceeds duration, which happens for a frame at the
+    // very end. Not worth a console entry every time.
+  }
+}
+
+/* ---- handing it to a television -----------------------------------------
+ *
+ * AirPlay does not mirror the page. Choose a receiver and the Apple TV is
+ * handed the video element's URL and fetches it itself, which means the URL
+ * has to be one the television can reach. This page is normally reached over
+ * a tunnel, and a television is not on that tunnel, so the address that works
+ * for the phone is exactly the one that does not work for the receiver.
+ *
+ * So the swap happens at the moment it becomes relevant: when playback goes
+ * wireless, the source is moved to the address on the local network, and the
+ * playhead put back where it was. Coming back off AirPlay reverses it. */
+let beforeAirplay = null;
+
+function handedToATelevision() {
+  const wireless = el.video.webkitCurrentPlaybackTargetIsWireless;
+  if (wireless && castBase && playInfo) {
+    const path =
+      playInfo.mode === "transcode" ? playInfo.playlist : playInfo.url;
+    if (!path || path.startsWith("http")) return;
+    beforeAirplay = { src: el.video.src, at: el.video.currentTime };
+    el.video.src = `${castBase}${path}`;
+    el.video.load();
+    el.video.currentTime = beforeAirplay.at;
+    el.video.play().catch(() => {});
+    setStatus("Playing on the television. It is fetching the film itself, not from this phone.");
+    return;
+  }
+  if (!wireless && beforeAirplay) {
+    const { src, at } = beforeAirplay;
+    beforeAirplay = null;
+    const resumeAt = el.video.currentTime || at;
+    el.video.src = src;
+    el.video.load();
+    el.video.currentTime = resumeAt;
+    el.video.play().catch(() => {});
+    setStatus("");
+  }
 }
 
 /* ---- one episode after another ------------------------------------------
@@ -1119,9 +1256,18 @@ function libraryRow(item, { withBadge = true } = {}) {
   const percent = item.pieces_total
     ? Math.floor((item.pieces_have / item.pieces_total) * 100)
     : 0;
-  size.textContent = item.complete
-    ? bytes(item.total_length)
-    : `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
+  /* Three states worth telling apart, because they mean different things to
+     somebody deciding what to watch. Still arriving. Here, but still being
+     converted, so it will play but the seeking will be slow. And ready, which
+     means it starts instantly, scrubs instantly, and will go to a television. */
+  if (!item.complete) {
+    size.textContent = `${bytes(item.bytes_on_disk)} of ${bytes(item.total_length)} (${percent}%)`;
+  } else if (item.preparing !== null && item.preparing !== undefined) {
+    size.textContent = `preparing ${Math.floor(item.preparing * 100)}%`;
+    size.title = "Converting it so it starts and seeks instantly, and plays on a television";
+  } else {
+    size.textContent = bytes(item.total_length);
+  }
 
   // Reopen something already on disk. Resolving by infohash finds the
   // running session rather than starting a second one, so a part-finished
@@ -1150,10 +1296,18 @@ function libraryRow(item, { withBadge = true } = {}) {
     refresh();
   });
 
-  if (withBadge) {
-    const badge = document.createElement("span");
+  const badge = document.createElement("span");
+  if (item.ready) {
+    // The one worth shouting about: this is the Netflix-grade state.
+    badge.className = "badge badge-ready";
+    badge.textContent = "ready";
+    badge.title = "Converted: instant start, instant seeking, plays on a television";
+  } else {
     badge.className = item.kept ? "badge badge-kept" : "badge";
     badge.textContent = item.kept ? "kept" : "temporary";
+  }
+
+  if (withBadge || item.ready) {
     row.append(name, size, badge, open, remove);
   } else {
     row.append(name, size, open, remove);
@@ -1972,6 +2126,24 @@ openFromFragment();
 // After playing something, and when the tab is looked at again, since the
 // position may have moved on another device pointed at the same server.
 el.video.addEventListener("pause", () => refreshContinuing());
+
+/* The lock screen's own scrubber, kept honest. `timeupdate` fires about four
+   times a second, which is more often than any lock screen redraws, so it is
+   thinned to once a second. */
+let toldTheSystemAt = 0;
+el.video.addEventListener("timeupdate", () => {
+  const now = el.video.currentTime;
+  if (Math.abs(now - toldTheSystemAt) < 1) return;
+  toldTheSystemAt = now;
+  tellTheSystemWhereWeAre();
+});
+el.video.addEventListener("loadedmetadata", tellTheSystemWhereWeAre);
+
+// Safari only. Everywhere else this event never fires and nothing changes.
+el.video.addEventListener(
+  "webkitcurrentplaybacktargetiswirelesschanged",
+  handedToATelevision,
+);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refreshContinuing();
 });

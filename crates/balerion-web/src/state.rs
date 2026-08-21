@@ -337,6 +337,10 @@ pub struct AppState {
     /// Files currently being transcribed, so two requests cannot start two
     /// transcriptions of the same thing and race to write the same file.
     transcribing: Mutex<std::collections::HashSet<(InfoHash, usize)>>,
+    /// Files being turned into something that plays anywhere, and how far
+    /// along each is. Present means running; absent means either not started
+    /// or finished, which [`crate::convert::ready`] tells apart.
+    converting: Mutex<HashMap<(InfoHash, usize), crate::convert::Progress>>,
     /// OpenSubtitles, when a key is configured.
     ///
     /// `None` is an ordinary state to be in: the player then shows whatever
@@ -353,6 +357,12 @@ pub struct AppState {
     /// own range endpoint and inherit the piece prioritisation for free.
     pub self_base: Mutex<String>,
     pub transcodes: tokio::sync::Semaphore,
+    /// One conversion at a time.
+    ///
+    /// Not because the machine cannot manage more, but because somebody
+    /// watching something must always win. A conversion is work for later and
+    /// can wait a few minutes; a segment somebody is waiting on cannot.
+    pub conversions: tokio::sync::Semaphore,
     /// How the transcoder is keeping up, which is the other half of "can this
     /// be watched live" and until now the unmeasured half.
     pub encoder: Encoder,
@@ -406,9 +416,11 @@ impl AppState {
             // a test or a fixture never has to touch the filesystem.
             history: Arc::new(crate::history::History::empty()),
             transcribing: Mutex::new(std::collections::HashSet::new()),
+            converting: Mutex::new(HashMap::new()),
             inbound: None,
             self_base: Mutex::new(String::new()),
             transcodes: tokio::sync::Semaphore::new(max_transcodes()),
+            conversions: tokio::sync::Semaphore::new(1),
             encoder: Encoder::default(),
             torrents: Mutex::new(HashMap::new()),
             probes: Mutex::new(HashMap::new()),
@@ -505,6 +517,50 @@ impl AppState {
             .expect("probes lock")
             .insert((*hash, file), Arc::clone(&probe));
         Ok(probe)
+    }
+
+    /// Claim the right to convert one file, so two callers cannot both start.
+    pub fn begin_converting(&self, hash: &InfoHash, file: usize, total: f64) -> bool {
+        let mut held = self.converting.lock().expect("converting lock");
+        if held.contains_key(&(*hash, file)) {
+            return false;
+        }
+        held.insert((*hash, file), crate::convert::Progress { done: 0.0, total });
+        true
+    }
+
+    /// Say how far a conversion has got.
+    pub fn converting_reached(&self, hash: &InfoHash, file: usize, done: f64) {
+        if let Some(progress) = self
+            .converting
+            .lock()
+            .expect("converting lock")
+            .get_mut(&(*hash, file))
+        {
+            progress.done = done;
+        }
+    }
+
+    /// Release the claim, whatever happened. Must be called or the file can
+    /// never be attempted again.
+    pub fn finished_converting(&self, hash: &InfoHash, file: usize) {
+        self.converting
+            .lock()
+            .expect("converting lock")
+            .remove(&(*hash, file));
+    }
+
+    /// How far along this torrent's conversion is, if one is running.
+    ///
+    /// By torrent rather than by file, because that is the question the shelf
+    /// asks: one row, one number.
+    pub fn conversion_of(&self, hash: &InfoHash) -> Option<crate::convert::Progress> {
+        self.converting
+            .lock()
+            .expect("converting lock")
+            .iter()
+            .find(|((held, _), _)| held == hash)
+            .map(|(_, progress)| *progress)
     }
 
     /// Claim the right to transcribe one file.

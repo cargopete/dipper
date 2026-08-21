@@ -391,6 +391,12 @@ pub struct Stats {
     /// How the transcoder is coping. Process-wide rather than per torrent,
     /// because the encoders share one machine.
     pub encoder: crate::state::EncoderStats,
+    /// How far along converting this one to play anywhere has got, from 0 to
+    /// 1, or `None` when nothing is being converted. Absent also covers both
+    /// "already done" and "never needed", which `ready` tells apart.
+    pub preparing: Option<f64>,
+    /// Is there a converted copy sitting ready?
+    pub ready: bool,
     /// Run lengths of the piece bitmap, starting with a run of missing pieces.
     ///
     /// A run-length encoding rather than a bit per piece: this is polled once
@@ -437,6 +443,13 @@ fn stats_for(state: &AppState, hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats
         playing: *torrent.playing.lock().expect("playing lock"),
         timings: torrent.clock.snapshot(),
         encoder: state.encoder.stats(),
+        preparing: state.conversion_of(hash).map(|p| p.fraction()),
+        // Any video file in it having a converted copy is enough to say so:
+        // that is the one the viewer will open.
+        ready: torrent.meta.files.iter().enumerate().any(|(index, entry)| {
+            crate::media::classify(&entry.path).kind == crate::media::Kind::Video
+                && crate::convert::ready(&torrent.root, index).is_some()
+        }),
         runs: runs(&have),
     }
 }
@@ -454,6 +467,12 @@ pub async fn stats(
 
 /// Everything the server currently has on disk or in flight.
 pub async fn list(State(state): State<Arc<AppState>>) -> Json<Vec<Stats>> {
+    // The moment anything kept finishes downloading, start preparing it. This
+    // is the poll the page already makes once a second, so it costs nothing
+    // and there is no event to wait for.
+    for (hash, _) in state.all() {
+        prepare_if_ready(&state, &hash);
+    }
     let mut all: Vec<Stats> = state
         .all()
         .iter()
@@ -487,6 +506,21 @@ async fn make_kept(torrent: &Arc<crate::state::Torrent>) {
         .await;
 }
 
+/// Convert a kept torrent once it is all here, so it plays anywhere.
+///
+/// Called on every poll rather than once, because "it has finished
+/// downloading" is not an event this side is told about. Cheap: it returns
+/// immediately unless the torrent is complete, needs converting, and is not
+/// already being converted.
+pub fn prepare_if_ready(state: &Arc<AppState>, hash: &InfoHash) {
+    let Some(torrent) = state.get(hash) else {
+        return;
+    };
+    if torrent.is_kept() && torrent.handle.stats().is_complete() {
+        crate::convert::prepare(state, *hash);
+    }
+}
+
 /// Mark a torrent to survive the sweep, and fetch all of it rather than only
 /// what the playhead needs.
 // One span covering every piece, not a range to be collected.
@@ -503,6 +537,7 @@ pub async fn keep(
 
     if request.keep {
         make_kept(&torrent).await;
+        prepare_if_ready(&state, &hash);
     } else {
         torrent.set_kept(false);
         if let Err(err) = mark_kept(&torrent.root, false).await {
