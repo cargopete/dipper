@@ -170,6 +170,13 @@ function mediaUrl(path, castBase, hostname) {
   return `${castBase}${path}`;
 }
 
+/** Safari owns the iPhone-to-Apple-TV hand-off. Other iPhone browsers are
+ * WebKit too, and may expose the same method, but selecting the handset's own
+ * speaker there never produces a wireless-target event. */
+function isSafariAirplayBrowser(userAgent) {
+  return !/(?:FxiOS|CriOS|EdgiOS|OPiOS)/i.test(userAgent || "");
+}
+
 /* Which of four states a thing in the library is in, and what to say about it.
  *
  * The whole point of the download-first path is that a person can look at a row
@@ -243,6 +250,7 @@ const BalerionLib = {
   feasible,
   shouldChangeVerdict,
   mediaUrl,
+  isSafariAirplayBrowser,
   stateOf,
 };
 

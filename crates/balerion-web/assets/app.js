@@ -35,6 +35,8 @@ const el = {
   torrent: $("torrent"),
   name: $("torrent-name"),
   meta: $("torrent-meta"),
+  detailsToggle: $("details-toggle"),
+  details: $("download-details"),
   keep: $("keep"),
   discard: $("discard"),
   backToResults: $("back-to-results"),
@@ -49,9 +51,13 @@ const el = {
   map: $("piecemap"),
   mapStatus: $("piecemap-status"),
   advisory: $("advisory"),
-  cast: $("cast"),
-  castUrl: $("cast-url"),
-  castCopy: $("cast-copy"),
+  remote: $("remote"),
+  remoteStatus: $("remote-status"),
+  remoteBack: $("remote-back"),
+  remoteToggle: $("remote-toggle"),
+  remoteForward: $("remote-forward"),
+  remoteShelf: $("remote-shelf"),
+  airplay: $("airplay"),
   library: $("library"),
   libraryList: $("library-list"),
   intakeStatus: $("intake-status"),
@@ -74,8 +80,18 @@ let filters = [];     // the subsets offered by the selected index
 let lastStats = null; // the most recent poll, for the feasibility advisory
 let playInfo = null;  // what /api/play said about the file being played
 let chosenAudio = 0;  // which audio track the viewer picked, when they did
-
 const audioQuery = () => (chosenAudio ? `?audio=${chosenAudio}` : "");
+
+/* Firefox on iPhone exposes WebKit's picker, but does not complete a web-video
+ * receiver hand-off to an LG. Safari does. Do not offer a button that turns a
+ * working phone player into a spinner. */
+function canPickAirplay() {
+  return (
+    !!castBase &&
+    typeof el.video.webkitShowPlaybackTargetPicker === "function" &&
+    isSafariAirplayBrowser(navigator.userAgent)
+  );
+}
 
 /* ---- formatting ---------------------------------------------------------
  *
@@ -91,8 +107,22 @@ function show(node, visible) {
 
 /* ---- talking to the server --------------------------------------------- */
 
+// A LAN player is deliberately gated.  Cookies are convenient, but an iPhone
+// browser may delay or decline persisting one for a bare IP address.  Keep the
+// invitation from the opening link on same-origin requests as well, so a
+// perfectly valid page cannot turn into an empty shell at its first fetch.
+const accessToken = new URLSearchParams(window.location.search).get("balerion_token");
+
+function withAccessToken(path) {
+  if (!accessToken || !path) return path;
+  const url = new URL(path, window.location.href);
+  if (url.origin !== window.location.origin) return path;
+  url.searchParams.set("balerion_token", accessToken);
+  return url.href;
+}
+
 async function api(path, options) {
-  const response = await fetch(path, options);
+  const response = await fetch(withAccessToken(path), options);
   if (response.status === 204) return null;
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -244,7 +274,7 @@ async function startTranscode(info) {
     buffer.mode = "segments";
     session.buffer = buffer;
 
-    const init = await fetch(info.init);
+    const init = await fetch(withAccessToken(info.init));
     if (!init.ok) throw new Error(await errorText(init));
     await idle(buffer);
     buffer.appendBuffer(await init.arrayBuffer());
@@ -282,7 +312,7 @@ async function pump() {
   const index = session.next;
   let waiting = false;
   try {
-    const response = await fetch(`${info.segment_prefix}${index}${info.segment_suffix ?? ""}`);
+    const response = await fetch(withAccessToken(`${info.segment_prefix}${index}${info.segment_suffix ?? ""}`));
 
     // 503 means the bytes have not arrived yet, not that anything is wrong.
     // Giving up here is what turns a slow torrent into a dead player, so we
@@ -530,7 +560,7 @@ function attachTracks(tracks) {
     node.kind = "subtitles";
     node.label = track.label;
     if (track.language) node.srclang = track.language;
-    node.src = track.url;
+    node.src = withAccessToken(track.url);
     if (index === 0) node.default = true;
     el.video.append(node);
   }
@@ -555,8 +585,6 @@ async function play(index) {
   show(el.pending, false);
   renderFiles();
   teardown();
-  el.video.removeAttribute("src");
-  el.video.load();
   show(el.video, false);
   show(el.viewerNote, true);
   const doneWaiting = sayWhileWaiting(el.viewerNote, [
@@ -628,6 +656,7 @@ async function play(index) {
     el.video.src = reachableUrl(info.url);
     el.video.load();
     resumeIfAsked(info);
+    handedToATelevision();
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
     });
@@ -644,6 +673,7 @@ async function play(index) {
     el.video.src = reachableUrl(info.playlist);
     el.video.load();
     resumeIfAsked(info);
+    handedToATelevision();
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
     });
@@ -759,34 +789,53 @@ function tellTheSystemWhereWeAre() {
  * a tunnel, and a television is not on that tunnel, so the address that works
  * for the phone is exactly the one that does not work for the receiver.
  *
- * So the swap happens at the moment it becomes relevant: when playback goes
- * wireless, the source is moved to the address on the local network, and the
- * playhead put back where it was. Coming back off AirPlay reverses it. */
+ * So the swap happens in the same tap that opens the receiver picker.  The
+ * receiver captures its source while that picker is opening, not after it has
+ * announced itself wireless. Coming back off AirPlay reverses it. */
 let beforeAirplay = null;
+
+function televisionUrl() {
+  if (!castBase || !playInfo) return null;
+  const path = playInfo.mode === "transcode" ? playInfo.playlist : playInfo.url;
+  if (!path || path.startsWith("http")) return null;
+  return `${castBase}${path}`;
+}
+
+function replaceSourceAt(src, at) {
+  let resumed = false;
+  const resume = () => {
+    if (resumed) return;
+    resumed = true;
+    if (Number.isFinite(at) && at > 0) {
+      try { el.video.currentTime = at; } catch {}
+    }
+    el.video.play().catch(() => {});
+  };
+  el.video.addEventListener("loadedmetadata", resume, { once: true });
+  el.video.src = src;
+  el.video.load();
+  if (el.video.readyState >= HTMLMediaElement.HAVE_METADATA) resume();
+}
 
 function handedToATelevision() {
   const wireless = el.video.webkitCurrentPlaybackTargetIsWireless;
-  if (wireless && castBase && playInfo) {
-    const path =
-      playInfo.mode === "transcode" ? playInfo.playlist : playInfo.url;
-    if (!path || path.startsWith("http")) return;
-    beforeAirplay = { src: el.video.src, at: el.video.currentTime };
-    el.video.src = `${castBase}${path}`;
-    el.video.load();
-    el.video.currentTime = beforeAirplay.at;
-    el.video.play().catch(() => {});
+  if (wireless && televisionUrl()) {
+    const url = televisionUrl();
+    if (!beforeAirplay) {
+      beforeAirplay = { src: el.video.src, at: el.video.currentTime };
+      replaceSourceAt(url, beforeAirplay.at);
+    }
     setStatus("Playing on the television. It is fetching the film itself, not from this phone.");
+    if (!el.remote.hidden) el.remoteStatus.textContent = "Playing on your TV. This phone is now the remote.";
     return;
   }
   if (!wireless && beforeAirplay) {
     const { src, at } = beforeAirplay;
     beforeAirplay = null;
     const resumeAt = el.video.currentTime || at;
-    el.video.src = src;
-    el.video.load();
-    el.video.currentTime = resumeAt;
-    el.video.play().catch(() => {});
+    replaceSourceAt(src, resumeAt);
     setStatus("");
+    if (!el.remote.hidden) el.remoteStatus.textContent = "Ready to play on your TV.";
   }
 }
 
@@ -1021,7 +1070,7 @@ let castBase = null;
  * Casting is unaffected. The URL offered to a television is built separately in
  * `showCastUrl`, from `castBase`, and always was. */
 function reachableUrl(path) {
-  return mediaUrl(path, castBase, window.location.hostname);
+  return withAccessToken(mediaUrl(path, castBase, window.location.hostname));
 }
 
 async function loadCastBase() {
@@ -1034,37 +1083,89 @@ async function loadCastBase() {
 }
 
 function showCastUrl() {
-  if (!castBase || !current || playing === null || !playInfo) {
-    show(el.cast, false);
+  if (!current || playing === null || !playInfo) {
+    show(el.remote, false);
     return;
   }
-  /* The address of the thing actually being played.
-   *
-   * `playInfo.url` is the converted copy when there is one, and the raw file
-   * when there is not. Building it by hand as `/stream/...` handed a television
-   * the original Matroska instead, which it cannot decode: the very file the
-   * conversion exists to replace. */
-  const path =
-    playInfo.mode === "transcode" ? playInfo.playlist : playInfo.url;
-  if (!path) {
-    show(el.cast, false);
+  show(el.remote, true);
+  if (!canPickAirplay()) {
+    el.remoteStatus.textContent = castBase
+      ? "Playing on this phone. Open Balerion in Safari to send it to your TV."
+      : "Playing on this phone. TV playback is not enabled on this Balerion.";
+    el.airplay.hidden = true;
     return;
   }
-  el.castUrl.textContent = `${castBase}${path}`;
-  show(el.cast, true);
+  el.airplay.hidden = false;
+  el.remoteStatus.textContent = "Ready to play on your TV.";
 }
 
-el.castCopy.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(el.castUrl.textContent);
-    el.castCopy.textContent = "Copied";
-    window.setTimeout(() => {
-      el.castCopy.textContent = "Copy";
-    }, 1600);
-  } catch {
-    // The text is selectable; that is a good enough fallback.
+function openAirplayPicker() {
+  if (!canPickAirplay()) return false;
+  const picker = el.video.webkitShowPlaybackTargetPicker;
+  if (typeof picker !== "function") {
+    el.remoteStatus.textContent = "Use the iPhone's AirPlay control in the player to choose your TV.";
+    return false;
   }
+  try {
+    // Give the receiver a LAN URL before it considers the target. Waiting for
+    // WebKit's wireless event is too late in Firefox: the LG gets the old
+    // source and never contacts the media-only listener.
+    const url = televisionUrl();
+    if (url && !beforeAirplay) {
+      beforeAirplay = { src: el.video.src, at: el.video.currentTime };
+      replaceSourceAt(url, beforeAirplay.at);
+    }
+    picker.call(el.video);
+    el.remoteStatus.textContent = "Choose your TV in the AirPlay picker.";
+    return true;
+  } catch {
+    // WebKit may reject a picker that has outlived the tap which requested it.
+    // The visible button gives the viewer a clean second attempt, not a URL.
+    el.remoteStatus.textContent = "Tap Watch on TV to choose your TV.";
+    return false;
+  }
+}
+
+el.airplay.addEventListener("click", () => openAirplayPicker());
+
+function remoteJump(seconds) {
+  if (!Number.isFinite(el.video.duration)) return;
+  el.video.currentTime = Math.min(Math.max(el.video.currentTime + seconds, 0), el.video.duration);
+}
+
+el.remoteBack.addEventListener("click", () => remoteJump(-10));
+el.remoteForward.addEventListener("click", () => remoteJump(30));
+el.remoteToggle.addEventListener("click", () => {
+  if (el.video.paused) el.video.play().catch(() => {});
+  else el.video.pause();
 });
+el.remoteShelf.addEventListener("click", () => {
+  show(el.torrent, false);
+  setMode("downloaded");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+el.video.addEventListener("play", () => { el.remoteToggle.textContent = "Pause"; });
+el.video.addEventListener("pause", () => { el.remoteToggle.textContent = "Play"; });
+
+async function watchDownloaded(item) {
+  // This is already held locally. Do not hand its bare infohash back to the
+  // magnet resolver, because that path is allowed to wait for swarm metadata.
+  // A downloaded episode opens from Balerion's own library, immediately.
+  show(el.failure, false);
+  show(el.torrent, false);
+  show(el.pending, true);
+  el.pendingNote.textContent = "Opening downloaded episode";
+  try {
+    const info = await api(`/api/torrents/${item.infohash}/open`);
+    renderTorrent(info);
+    refresh();
+  } catch (err) {
+    show(el.failure, true);
+    el.failureBody.textContent = err.message;
+  } finally {
+    show(el.pending, false);
+  }
+}
 
 /** `S01E03`, when the filename said so. */
 function episodeLabel(file) {
@@ -1154,6 +1255,9 @@ function renderTorrent(info) {
     .join("  /  ");
 
   el.keep.checked = info.kept;
+  show(el.details, false);
+  el.detailsToggle.setAttribute("aria-expanded", "false");
+  el.detailsToggle.textContent = "Download details";
   show(el.torrent, true);
   show(el.pending, false);
   show(el.failure, false);
@@ -1169,6 +1273,13 @@ function renderTorrent(info) {
     renderFiles();
   }
 }
+
+el.detailsToggle.addEventListener("click", () => {
+  const opening = el.details.hidden;
+  show(el.details, opening);
+  el.detailsToggle.setAttribute("aria-expanded", opening ? "true" : "false");
+  el.detailsToggle.textContent = opening ? "Hide details" : "Download details";
+});
 
 function renderStats(stats) {
   lastStats = stats;
@@ -1279,9 +1390,6 @@ function libraryRow(item, { withBadge = true } = {}) {
   // torrent carries on downloading from where it stopped.
   const open = document.createElement("button");
   open.type = "button";
-  open.className = "button-small";
-  open.textContent = item.complete ? "Watch" : "Resume";
-  open.addEventListener("click", () => openTorrent(item.infohash));
 
   const remove = document.createElement("button");
   remove.type = "button";
@@ -1301,13 +1409,17 @@ function libraryRow(item, { withBadge = true } = {}) {
     refresh();
   });
 
-  /* The action says what it will actually be like, rather than always
-     promising the same thing. Watching something still arriving is allowed and
-     is sometimes what you want; it should not be dressed up as the good path. */
-  open.textContent = { ready: "Watch", playable: "Watch", preparing: "Watch anyway", downloading: "Watch anyway" }[state.stage];
-  open.className = state.stage === "ready" || state.stage === "playable" ? "button-small" : "button-quiet";
-  if (state.stage === "downloading") {
-    open.title = "It will play, but it can only go as fast as it is arriving";
+  /* Download means download. A half-finished episode does not offer a tempting
+     second path which turns out to be a stuttering stream. Once it is ready,
+     Watch takes the viewer straight to the television picker. */
+  if (item.complete && (state.stage === "ready" || state.stage === "playable")) {
+    open.textContent = "Watch";
+    open.className = "button-small";
+    open.addEventListener("click", () => watchDownloaded(item));
+  } else {
+    open.textContent = state.stage === "preparing" ? "Preparing" : "Downloading";
+    open.className = "button-quiet";
+    open.disabled = true;
   }
 
   const holder = document.createElement("span");

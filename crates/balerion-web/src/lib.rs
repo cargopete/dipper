@@ -104,6 +104,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/continue", get(routes::continuing))
         .route("/api/progress/{hash}/{file}", post(routes::progress))
         .route("/api/torrents", get(routes::list))
+        .route("/api/torrents/{hash}/open", get(routes::open))
         .route("/api/torrents/{hash}", get(routes::stats))
         .route("/api/torrents/{hash}", delete(routes::remove))
         .route("/api/torrents/{hash}/keep", post(routes::keep))

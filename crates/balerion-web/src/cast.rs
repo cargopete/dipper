@@ -21,6 +21,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, header};
+use axum::response::Response;
 use axum::routing::get;
 
 use crate::state::AppState;
@@ -44,8 +47,28 @@ pub fn router(state: Arc<AppState>) -> Router {
          * and AirPlay simply died, while the player beside it was playing the
          * same film perfectly. Everything on this listener is read-only media,
          * and a finished MP4 is the most read-only thing here. */
-        .route("/ready/{hash}/{file}", get(crate::convert::serve))
+        .route("/ready/{hash}/{file}", get(ready))
         .with_state(state)
+}
+
+/// Log exactly what the receiver asks for before serving its prepared MP4.
+///
+/// A television is a separate HTTP client.  The phone succeeding therefore
+/// tells us nothing about whether the receiver is following the byte-range
+/// contract, and AirPlay's own error reporting is conspicuously unhelpful.
+/// Keep this at the cast boundary so ordinary phone playback does not fill the
+/// service log.
+async fn ready(
+    State(state): State<Arc<AppState>>,
+    Path((hash, file)): Path<(String, usize)>,
+    headers: HeaderMap,
+) -> Response {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("none");
+    tracing::info!(%hash, file, %range, "television requested prepared media");
+    crate::convert::serve(State(state), Path((hash, file)), headers).await
 }
 
 /// Serve the media endpoints on `address` until the process ends.

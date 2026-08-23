@@ -521,6 +521,67 @@ label {
   overflow: hidden;
 }
 
+/* Watching is the product. The machinery sits behind Download details, where
+   it remains useful without making every finished episode resemble a flight
+   recorder. */
+.player-stage { grid-template-columns: 1fr; }
+.player-stage .viewer { min-height: min(62vh, 34rem); }
+
+.remote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface);
+}
+.remote p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+.remote-copy { min-width: 0; }
+.remote-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+.remote-controls button { min-height: 2.5rem; }
+.remote-controls .button-small {
+  min-height: 2.5rem;
+  width: auto;
+  background: var(--accent);
+  color: var(--bg-code);
+}
+.remote .button-small {
+  min-height: 2.75rem;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-code);
+}
+.remote .button-small:hover { background: var(--accent-lift); }
+
+.download-details {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 0.2rem;
+}
+.detail-actions { display: flex; align-items: center; gap: 1rem; }
+.download-details .telemetry {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface);
+}
+.download-details .telemetry dl {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+}
+.download-details .reading { border-bottom: 0; border-right: 1px solid var(--rule); }
+.download-details .reading:last-child { border-right: 0; }
+
 .viewer {
   position: relative;
   display: flex;
@@ -815,6 +876,13 @@ video { width: 100%; max-height: 70vh; display: block; background: var(--bg-code
   /* Thumbs, not pointers. */
   .button-small { min-height: 2.5rem; padding: 0.55rem 0.9rem; }
   .torrent-head { flex-direction: column; align-items: flex-start; }
+  .remote { align-items: stretch; flex-direction: column; }
+  .remote .button-small { width: 100%; }
+  .remote-controls { display: grid; grid-template-columns: 1fr 1fr; }
+  .remote-controls .button-small { width: 100%; }
+  .download-details .telemetry dl { grid-template-columns: 1fr 1fr; }
+  .download-details .reading { border-bottom: 1px solid var(--rule); }
+  .download-details .reading:nth-child(even) { border-right: 0; }
 }
 
 /* ---- reduced motion ----------------------------------------------------- */

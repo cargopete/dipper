@@ -158,16 +158,12 @@
         <button type="button" id="back-to-results" class="button-quiet" hidden>
           Back to results
         </button>
-        <label class="toggle">
-          <input type="checkbox" id="keep">
-          <span>Keep offline</span>
-        </label>
-        <button type="button" id="discard" class="button-quiet">Delete</button>
+        <button type="button" id="details-toggle" class="button-quiet"
+                aria-expanded="false" aria-controls="download-details">Download details</button>
       </div>
     </div>
-    <p class="torrent-meta" id="torrent-meta"></p>
 
-    <div class="stage">
+    <div class="stage player-stage">
       <div class="viewer" id="viewer">
         <!-- x-webkit-airplay is what puts the AirPlay button in Safari's own
              controls. It only does anything for media the receiver can fetch
@@ -186,7 +182,33 @@
           <select id="audio-tracks"></select>
         </div>
       </div>
+    </div>
 
+    <!-- The phone is the remote. Safari supplies the receiver picker, and the
+         player swaps to the LAN media address only after a television is
+         chosen. Nothing about that requires a URL to be copied by hand. -->
+    <div class="remote" id="remote" hidden>
+      <div class="remote-copy">
+        <p id="remote-status" role="status">Ready to play on this phone.</p>
+        <div class="remote-controls" aria-label="Playback controls">
+          <button type="button" id="remote-back" class="button-quiet">Back 10</button>
+          <button type="button" id="remote-toggle" class="button-small">Pause</button>
+          <button type="button" id="remote-forward" class="button-quiet">Forward 30</button>
+          <button type="button" id="remote-shelf" class="button-quiet">Downloaded</button>
+        </div>
+      </div>
+      <button type="button" id="airplay" class="button-small">Watch on TV</button>
+    </div>
+
+    <!-- The torrent is still inspectable, just no longer sat between somebody
+         and an episode they have already downloaded. -->
+    <section id="download-details" class="download-details" hidden>
+      <p class="torrent-meta" id="torrent-meta"></p>
+      <div class="detail-actions">
+        <label class="toggle"><input type="checkbox" id="keep"><span>Keep offline</span></label>
+        <button type="button" id="discard" class="button-quiet">Delete</button>
+      </div>
+      <p class="advisory" id="advisory" hidden role="status"></p>
       <aside class="telemetry" aria-label="Download telemetry">
         <dl>
           <div class="reading"><dt>Peers</dt><dd id="t-peers">0</dd></div>
@@ -196,33 +218,17 @@
           <div class="reading"><dt>On disk</dt><dd id="t-disk">0 B</dd></div>
         </dl>
       </aside>
-    </div>
-
-    <p class="advisory" id="advisory" hidden role="status"></p>
-
-    <!-- Only shown when casting is switched on and this machine has an address
-         another device could reach. A television fetches the media itself, so
-         what it needs is a URL rather than a button in this page. -->
-    <div class="cast" id="cast" hidden>
-      <span class="cast-label">Cast to a television</span>
-      <code class="cast-url" id="cast-url"></code>
-      <button type="button" id="cast-copy" class="button-small">Copy</button>
-    </div>
-
-    <figure class="piecemap">
-      <canvas id="piecemap" height="28"></canvas>
-      <figcaption>
-        <span class="key"><span class="swatch swatch-have"></span>on disk</span>
-        <span class="key"><span class="swatch swatch-want"></span>not yet</span>
-        <span class="key"><span class="swatch swatch-head"></span>playhead</span>
-        <span class="piecemap-status" id="piecemap-status" role="status"></span>
-      </figcaption>
-    </figure>
-
-    <div class="files">
-      <h3>Files</h3>
-      <ul id="file-list"></ul>
-    </div>
+      <figure class="piecemap">
+        <canvas id="piecemap" height="28"></canvas>
+        <figcaption>
+          <span class="key"><span class="swatch swatch-have"></span>on disk</span>
+          <span class="key"><span class="swatch swatch-want"></span>not yet</span>
+          <span class="key"><span class="swatch swatch-head"></span>playhead</span>
+          <span class="piecemap-status" id="piecemap-status" role="status"></span>
+        </figcaption>
+      </figure>
+      <div class="files"><h3>Files</h3><ul id="file-list"></ul></div>
+    </section>
   </section>
 
   <section id="library" hidden aria-labelledby="library-heading">

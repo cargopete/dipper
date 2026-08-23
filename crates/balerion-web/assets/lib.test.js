@@ -171,6 +171,26 @@ describe("mediaUrl", () => {
   });
 });
 
+describe("isSafariAirplayBrowser", () => {
+  it("keeps the receiver hand-off in Safari", () => {
+    assert.equal(
+      lib.isSafariAirplayBrowser(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.0 Mobile/15E148 Safari/604.1",
+      ),
+      true,
+    );
+  });
+
+  it("does not mistake iPhone Firefox for Safari", () => {
+    assert.equal(
+      lib.isSafariAirplayBrowser(
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 FxiOS/146.0 Mobile/15E148 Safari/605.1.15",
+      ),
+      false,
+    );
+  });
+});
+
 /* The false accusation this replaces: two different programmes whose first
    episodes share a number, reported as duplicates, with an offer to delete
    one of them. */

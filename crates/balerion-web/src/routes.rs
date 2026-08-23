@@ -405,6 +405,14 @@ pub struct Stats {
     pub preparing: Option<f64>,
     /// Is there a converted copy sitting ready?
     pub ready: bool,
+    /// The file a finished download opens by default, so the shelf can hand
+    /// Safari a real media resource within the Watch tap. That is the narrow
+    /// window in which WebKit allows its AirPlay receiver picker to open.
+    pub suggested: Option<usize>,
+    /// A browser-reachable source for that file. It is deliberately a path:
+    /// when a receiver is selected the page substitutes the media-only LAN
+    /// listener, while the phone continues using the origin it actually knows.
+    pub watch_url: Option<String>,
     /// Run lengths of the piece bitmap, starting with a run of missing pieces.
     ///
     /// A run-length encoding rather than a bit per piece: this is polled once
@@ -435,6 +443,14 @@ fn runs(have: &Bitfield) -> Vec<usize> {
 fn stats_for(state: &AppState, hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats {
     let snapshot = torrent.handle.stats();
     let have = torrent.handle.have();
+    let suggested = media::best_to_play(&torrent.meta.files);
+    let watch_url = suggested.map(|file| {
+        if crate::convert::ready(&torrent.root, file).is_some() {
+            format!("/ready/{hash}/{file}")
+        } else {
+            format!("/stream/{hash}/{file}")
+        }
+    });
     Stats {
         infohash: hash.to_hex(),
         name: torrent.meta.name.clone(),
@@ -458,6 +474,8 @@ fn stats_for(state: &AppState, hash: &InfoHash, torrent: &Arc<Torrent>) -> Stats
             crate::media::classify(&entry.path).kind == crate::media::Kind::Video
                 && crate::convert::ready(&torrent.root, index).is_some()
         }),
+        suggested,
+        watch_url,
         runs: runs(&have),
     }
 }
@@ -471,6 +489,24 @@ pub async fn stats(
         .get(&hash)
         .ok_or_else(|| not_found("no such torrent"))?;
     Ok(Json(stats_for(&state, &hash, &torrent)))
+}
+
+/// Open a torrent Balerion already holds without re-resolving its magnet.
+///
+/// The Downloaded shelf has an infohash, not the original magnet.  Feeding that
+/// hash back through the general resolver normally happens to find the live
+/// torrent, but it also puts the viewer behind the swarm-shaped loading path.
+/// A finished local episode must not mention peers at all.
+pub async fn open(
+    State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+) -> Result<Json<TorrentInfo>, ApiError> {
+    let hash = InfoHash::parse(&hash).map_err(|_| not_found("that is not an infohash"))?;
+    let torrent = state
+        .get(&hash)
+        .ok_or_else(|| not_found("that downloaded item is no longer here"))?;
+    torrent.touch();
+    Ok(Json(describe(&torrent.meta, torrent.is_kept())))
 }
 
 /// Everything the server currently has on disk or in flight.
