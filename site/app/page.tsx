@@ -72,6 +72,22 @@ type Row = {
 /** Where a local Balerion is expected to be listening. */
 const DEFAULT_LOCAL = "http://127.0.0.1:8080";
 
+/** A player origin, optionally with the access invitation it needs on a LAN. */
+function localUrl(base: string): URL {
+  try {
+    const url = new URL(base.trim());
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      (url.pathname === "/" || url.pathname === "")
+    ) {
+      return url;
+    }
+  } catch {
+    // The loopback default below is the safe, useful fallback.
+  }
+  return new URL(DEFAULT_LOCAL);
+}
+
 /**
  * A link that opens whatever Balerion is running on the machine you are reading
  * this on, with the thing already chosen.
@@ -91,15 +107,16 @@ function watchHere(
      something quite different. With an empty base this built "/#magnet=...",
      which is a fragment on *this* page: clicking it scrolls to the top and
      nothing else happens, and there is nothing on screen to say why. */
-  const trimmed = base.trim().replace(/\/+$/, "");
-  const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
-  const alt = alternatives.map((m) => `&alt=${encodeURIComponent(m)}`).join("");
+  const usable = localUrl(base);
+  const fragment = new URLSearchParams({ magnet: open });
+  for (const alternative of alternatives) fragment.append("alt", alternative);
   /* The persistent path. Watching borrows a copy and lets Balerion's sweep take
      it back once nobody is looking; keeping fetches the whole thing and holds it
      until it is deleted by hand. Same link, one flag apart, because they are the
      same journey with a different ending. */
-  const intent = keep ? "&keep=1" : "";
-  return `${usable}/#magnet=${encodeURIComponent(open)}${alt}${intent}`;
+  if (keep) fragment.set("keep", "1");
+  usable.hash = fragment.toString();
+  return usable.href;
 }
 
 /* Claim a window while the tap is still a tap, and put something in it.
@@ -147,9 +164,9 @@ function handOver(url: string, waiting: Window | null) {
 
 /** The shelf of what has been kept, which only Balerion itself knows about. */
 function shelfHere(base: string): string {
-  const trimmed = base.trim().replace(/\/+$/, "");
-  const usable = /^https?:\/\/[^/]+$/.test(trimmed) ? trimmed : DEFAULT_LOCAL;
-  return `${usable}/#downloaded`;
+  const usable = localUrl(base);
+  usable.hash = "downloaded";
+  return usable.href;
 }
 
 /* A synopsis cut to length without cutting a word in half.
@@ -293,8 +310,9 @@ export default function Page() {
     setLocal(value);
     /* A blank or half-typed value is not worth remembering, and remembering one
        would outlive the moment it was typed in. */
-    if (/^https?:\/\/[^/]+$/.test(value.trim())) {
-      window.localStorage.setItem("balerion.local", value.trim());
+    const parsed = localUrl(value);
+    if (parsed.href !== `${DEFAULT_LOCAL}/`) {
+      window.localStorage.setItem("balerion.local", parsed.href);
     } else {
       window.localStorage.removeItem("balerion.local");
     }

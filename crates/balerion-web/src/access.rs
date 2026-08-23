@@ -96,6 +96,12 @@ fn offered(request: &Request) -> Option<String> {
 /// instead treated as not being local, so the failure mode is "asks for the
 /// token" rather than "breaks".
 pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let method = request.method().clone();
+    let player_action = matches!(
+        path.as_str(),
+        "/api/resolve" | "/api/torrents" | "/api/play"
+    ) || path.starts_with("/api/play/");
     let Some(token) = state.config.access_token.clone() else {
         return next.run(request).await;
     };
@@ -111,9 +117,15 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     }
 
     let Some(offered) = offered(&request) else {
+        if player_action {
+            tracing::warn!(%method, %path, "player request had no access token");
+        }
         return refuse(&request);
     };
     if !same_secret(&offered, &token) {
+        if player_action {
+            tracing::warn!(%method, %path, "player request had the wrong access token");
+        }
         return refuse(&request);
     }
 
@@ -123,6 +135,9 @@ pub async fn guard(State(state): State<Arc<AppState>>, request: Request, next: N
     let mut response = next.run(request).await;
     if let Ok(cookie) = format!("{TOKEN}={token}; Path=/; SameSite=Lax; Max-Age=31536000").parse() {
         response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    if player_action {
+        tracing::info!(%method, %path, status = %response.status(), "player request completed");
     }
     response
 }
