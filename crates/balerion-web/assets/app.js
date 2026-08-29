@@ -98,7 +98,7 @@ function canPickAirplay() {
  * These live in lib.js, which is loaded first and has tests of its own. They
  * are the parts of this file that are only arithmetic, and they were the parts
  * with no way to run them outside a browser. */
-const { bytes, seconds, roughly, episodeTagOf, seriesOf, feasible, shouldChangeVerdict, mediaUrl, stateOf } =
+const { bytes, seconds, roughly, episodeTagOf, seriesOf, feasible, shouldChangeVerdict, playsHlsNatively, stateOf } =
   window.BalerionLib;
 
 function show(node, visible) {
@@ -222,6 +222,10 @@ const TARGET_BUFFER = 24;
 /** Segments to gather before playback starts, so the opening does not stutter. */
 const STARTUP_SEGMENTS = 3;
 
+/** How long a native HLS player gets to read a header before we stop believing
+ * it can. Generous, because the first segment has to be encoded first. */
+const HLS_PATIENCE_MS = 12_000;
+
 function once(target, event) {
   return new Promise((resolve) => target.addEventListener(event, resolve, { once: true }));
 }
@@ -256,12 +260,21 @@ async function startTranscode(info) {
 
   const source = new MediaSource();
   const url = URL.createObjectURL(source);
-  const session = { source, url, info, next: 0, stopped: false, buffer: null, primed: false };
+  const session = {
+    source,
+    url,
+    info,
+    next: 0,
+    stopped: false,
+    buffer: null,
+    primed: false,
+    // Bumped by every seek, so a fetch that was already in flight when the
+    // viewer moved cannot decide where the session is when it lands.
+    generation: 0,
+  };
   mse = session;
 
-  show(el.video, true);
-  show(el.viewerNote, false);
-  show(el.pending, false);
+  showThePicture();
   el.video.src = url;
 
   await once(source, "sourceopen");
@@ -279,6 +292,31 @@ async function startTranscode(info) {
     await idle(buffer);
     buffer.appendBuffer(await init.arrayBuffer());
     await once(buffer, "updateend");
+
+    /* Pick up where the viewer left off *before* asking for a single segment.
+     *
+     * Seeking afterwards loses a race that is not obvious and is fatal when it
+     * is lost. `reseek` sets the session's next segment to the one under the
+     * playhead, but the `pump` already in flight finishes after it and sets
+     * `next` to its own index plus one, which puts the session back at the
+     * start of the film. It then encodes forward from there while the playhead
+     * sits half an hour ahead: the buffer fills with video nobody is looking
+     * at, the element never gets past HAVE_METADATA, and the page shows a
+     * player that simply will not start.
+     *
+     * Measured on a 53 minute episode resuming at 36:17: after 42 seconds it
+     * had reached 13:06 and would have needed about six more minutes to arrive
+     * at the frame it had been asked for. Which reads, from a sofa, as broken.
+     *
+     * `next` is set before `currentTime` on purpose, so that the `seeking`
+     * event this fires finds the session already pointed at the right segment
+     * and returns without doing anything. */
+    const at = Number(info.resume_at);
+    if (Number.isFinite(at) && at > 0 && el.video.currentTime < 1) {
+      session.next = Math.floor(at / info.segment_seconds);
+      el.video.currentTime = at;
+      setStatus(`Picking up at ${seconds(at)}.`);
+    }
 
     pump();
   } catch (err) {
@@ -310,6 +348,10 @@ async function pump() {
 
   session.busy = true;
   const index = session.next;
+  // Which seek this fetch belongs to. A seek that happens while it is in the
+  // air makes it stale, and a stale segment must not be appended and must not
+  // decide what comes next.
+  const generation = session.generation;
   let waiting = false;
   try {
     const response = await fetch(withAccessToken(`${info.segment_prefix}${index}${info.segment_suffix ?? ""}`));
@@ -326,12 +368,12 @@ async function pump() {
     if (!response.ok) throw new Error(await errorText(response));
 
     const bytes = await response.arrayBuffer();
-    if (session.stopped || session !== mse) return;
+    if (session.stopped || session !== mse || session.generation !== generation) return;
 
     await idle(buffer);
     buffer.timestampOffset = index * info.segment_seconds;
     await appendWithEviction(buffer, bytes);
-    session.next = index + 1;
+    if (session.generation === generation) session.next = index + 1;
     setStatus("");
 
     // Hold off until there is a runway. Starting the instant segment 0 lands
@@ -348,11 +390,22 @@ async function pump() {
     }
   } finally {
     session.busy = false;
-  }
 
-  if (mse !== session || session.stopped) return;
-  // Back off when waiting on the swarm; otherwise keep the buffer topped up.
-  setTimeout(pump, waiting ? 2000 : 0);
+    /* Scheduling the next turn belongs here and not after the block.
+     *
+     * A `return` inside a `try` runs the `finally` and then leaves the
+     * function, so anything written below the block is skipped by every early
+     * exit above - including the 503, whose whole purpose is to come back for
+     * the same segment shortly. It did not come back. Nothing else pumps
+     * unless the element is playing, because the other two callers are
+     * `timeupdate` and `waiting`, and an element that never started fires
+     * neither. So one 503 on segment zero, which is the ordinary state of a
+     * cold torrent, stopped the player for good. */
+    if (mse === session && !session.stopped) {
+      // Back off when waiting on the swarm; otherwise keep the buffer topped up.
+      setTimeout(pump, waiting ? 2000 : 0);
+    }
+  }
 }
 
 /* ---- can this actually be watched? -------------------------------------
@@ -515,6 +568,9 @@ async function reseek() {
   if (wanted === session.next) return;
 
   session.next = wanted;
+  // Anything already in the air belongs to where the viewer used to be. Say so
+  // here rather than trusting it to land first, because it will not.
+  session.generation += 1;
   try {
     await idle(session.buffer);
     // Drop everything: what is buffered is for a part of the film the viewer
@@ -532,6 +588,19 @@ async function reseek() {
 async function errorText(response) {
   const body = await response.json().catch(() => null);
   return (body && body.error) || `${response.status} ${response.statusText}`;
+}
+
+/* The picture has the screen now.
+ *
+ * The note is emptied rather than merely hidden. A line reading "Working out
+ * how to play this" left sitting in the DOM behind a player that has not
+ * started is the page agreeing with the viewer that nothing is happening, and
+ * it is what somebody reads back when they come to describe the fault. */
+function showThePicture() {
+  show(el.video, true);
+  show(el.pending, false);
+  show(el.viewerNote, false);
+  el.viewerNote.replaceChildren();
 }
 
 function showViewerNote(message, download) {
@@ -650,9 +719,7 @@ async function play(index) {
   }
 
   if (info.mode === "direct") {
-    show(el.video, true);
-    show(el.viewerNote, false);
-    show(el.pending, false);
+    showThePicture();
     el.video.src = reachableUrl(info.url);
     el.video.load();
     resumeIfAsked(info);
@@ -665,11 +732,15 @@ async function play(index) {
 
   /* Safari plays HLS itself, and doing it that way is what makes AirPlay work:
    * the television is handed a URL and fetches it, which it cannot do with a
-   * MediaSource blob. Everywhere else, feed MediaSource as before. */
-  if (el.video.canPlayType("application/vnd.apple.mpegurl") && info.playlist) {
-    show(el.video, true);
-    show(el.viewerNote, false);
-    show(el.pending, false);
+   * MediaSource blob. Everywhere else, feed MediaSource as before.
+   *
+   * Asking the element whether it can play HLS is not enough on its own; see
+   * `playsHlsNatively`, and the watchdog below for when it is wrong anyway. */
+  if (
+    info.playlist &&
+    playsHlsNatively(navigator.userAgent, el.video.canPlayType("application/vnd.apple.mpegurl"))
+  ) {
+    showThePicture();
     el.video.src = reachableUrl(info.playlist);
     el.video.load();
     resumeIfAsked(info);
@@ -677,11 +748,23 @@ async function play(index) {
     el.video.play().catch(() => {
       // Autoplay refused. The controls are right there.
     });
+    /* A player that has not so much as read the header after this long is not
+     * slow, it is stuck, and it will not say so itself. Fall back rather than
+     * leave somebody looking at a still frame of nothing.
+     *
+     * Only where there is something to fall back to. An iPhone has no
+     * MediaSource at all, so HLS is the only way to play this and switching
+     * would trade a slow start for a flat refusal. */
+    window.setTimeout(() => {
+      if (playing !== index || playInfo !== info) return;
+      if (el.video.readyState >= 1 || el.video.error) return;
+      if (!window.MediaSource || !MediaSource.isTypeSupported(info.mime)) return;
+      startTranscode(info);
+    }, HLS_PATIENCE_MS);
     return;
   }
 
   await startTranscode(info);
-  resumeIfAsked(info);
 }
 
 /* ---- what the phone shows when the screen is off -------------------------
@@ -1045,32 +1128,32 @@ el.video.addEventListener("seeking", () => reseek());
  * playlist; anything a television could already open gets the file itself. */
 let castBase = null;
 
-/* Where the media should be fetched from, so that a television can fetch it too.
+/* Where the media should be fetched from: the origin that served the page.
  *
- * AirPlay does not mirror a video element, it hands the receiver the URL and
- * lets it fetch the media itself. An Apple TV given `http://127.0.0.1:8080/...`
- * reaches nothing, so the button appeared to do nothing and the whole feature
- * was a URL to copy by hand. With `--cast-port` on there is a LAN address
- * serving exactly the same bytes, so playback was pointed at that instead.
+ * It used to be the cast address instead, on the reasoning that AirPlay does
+ * not mirror a video element - it hands the receiver a URL and lets it fetch
+ * the media itself - so the element's `src` had better be one a television can
+ * reach. True as far as it goes, and it cost the ordinary case dearly.
  *
- * That rested on an assumption which used to be true and is not any more: that
- * the browser and the player are on the same machine, so the player's LAN
- * address is *this* machine's LAN address and certainly reachable. Move the
- * player to a box that stays on and watch from a phone over a tunnel, and the
- * LAN address means nothing to the phone. The video element is handed
- * `http://192.168.0.13:8081/...`, fetches nothing, and sits at 0:00 with no
- * error, forever. Which is exactly what it did.
+ * The page is served from `127.0.0.1:8080` and playback was pointed at
+ * `192.168.0.8:8081`, which is a different origin, on a different port, at an
+ * address the browser has every reason to be careful about: Safari now wants
+ * permission before a page reaches a local-network address, and refuses
+ * quietly when it does not have it. A video element handed a URL it cannot
+ * fetch does not report an error. It sits at 0:00, with a spinner, for ever.
  *
- * So the substitution is made only when the page itself came from loopback,
- * which is the one case where "its own machine's LAN address" is a true
- * description. Anywhere else the media is fetched from the origin that served
- * the page, because that is the one address the viewer is known to be able to
- * reach: they are looking at it.
+ * The origin that served the page is the one address the viewer is known to be
+ * able to reach, because they are looking at it, and it serves every one of
+ * these paths itself. So play from there, always.
  *
- * Casting is unaffected. The URL offered to a television is built separately in
- * `showCastUrl`, from `castBase`, and always was. */
+ * Nothing is lost on the television side. `handedToATelevision` already swaps
+ * the source for the LAN URL at the moment a wireless target actually takes
+ * over, and swaps it back afterwards; and the URL offered for copying is built
+ * separately in `showCastUrl`. Doing it at hand-off rather than in advance is
+ * the right time to do it anyway: it is the only moment we know a television
+ * is involved. */
 function reachableUrl(path) {
-  return withAccessToken(mediaUrl(path, castBase, window.location.hostname));
+  return withAccessToken(path);
 }
 
 async function loadCastBase() {

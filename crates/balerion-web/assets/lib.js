@@ -142,32 +142,29 @@ function shouldChangeVerdict(previous, next, ratio) {
   return next ? ratio > 1.3 : ratio < 0.9;
 }
 
-/* Which address the media should be fetched from.
+/* Whether this browser really plays HLS, or is only saying that it might.
  *
- * `castBase` is a LAN address serving the same bytes, and exists so that a
- * television handed a URL can fetch it: AirPlay does not mirror a video
- * element, it passes the receiver a URL. Pointing playback at it too was free
- * *while the player and the browser were the same machine*, because then the
- * player's LAN address is this machine's own.
+ * `canPlayType("application/vnd.apple.mpegurl")` looks like the question and is
+ * not it. Chrome on a desktop answers `"maybe"` and then cannot: handed a
+ * playlist, the element sits at networkState 2 for ever, never reaches
+ * HAVE_METADATA, and - the part that makes it expensive - never fires `error`.
+ * There is nothing for the page to react to, so it shows a player that will
+ * not start and says nothing about why. Measured on Chrome 151 for macOS.
  *
- * Once the player moved to a box that stays on, that stopped being true. A
- * phone on a tunnel cannot reach `192.168.0.13`, so the video element fetched
- * nothing and sat at 0:00 with no error to show for it.
+ * Only WebKit ships a native HLS demuxer, so the claim is believed from WebKit
+ * and from nobody else. Every browser on an iPhone or iPad is WebKit whatever
+ * its user agent says, which is why those are checked for first; Safari's own
+ * agent string carries `Safari/` but so does Chrome's, so it is the absence of
+ * the others that identifies it.
  *
- * `hostname` is what decides: served from loopback, the player is here and its
- * LAN address is ours. Served from anywhere else, use the path as given, so
- * the media comes from the origin that served the page. That is the one
- * address the viewer is definitely able to reach, since they are looking at it.
+ * Everywhere else there is MediaSource, which is the well-worn path anyway.
  */
-const LOOPBACK = ["localhost", "127.0.0.1", "[::1]", "::1"];
-
-function mediaUrl(path, castBase, hostname) {
-  if (!path) return path;
-  // Already absolute: whoever built it has decided.
-  if (path.startsWith("http")) return path;
-  if (!castBase) return path;
-  if (!LOOPBACK.includes(hostname)) return path;
-  return `${castBase}${path}`;
+function playsHlsNatively(userAgent, canPlayType) {
+  if (!canPlayType) return false;
+  const agent = userAgent || "";
+  if (/iPhone|iPad|iPod|CriOS|FxiOS|EdgiOS|OPiOS/i.test(agent)) return true;
+  if (/Chrome\/|Chromium\/|Edg\/|Firefox\/|OPR\//i.test(agent)) return false;
+  return /Safari\//i.test(agent);
 }
 
 /** Safari owns the iPhone-to-Apple-TV hand-off. Other iPhone browsers are
@@ -249,7 +246,7 @@ const BalerionLib = {
   seriesOf,
   feasible,
   shouldChangeVerdict,
-  mediaUrl,
+  playsHlsNatively,
   isSafariAirplayBrowser,
   stateOf,
 };

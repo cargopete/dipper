@@ -132,42 +132,41 @@ test("a verdict does not flap when the rate hovers at the threshold", () => {
 });
 
 
-/* The bug this exists to prevent: a phone handed a LAN address it cannot reach,
-   fetching nothing and sitting at 0:00 with no error to show for it. */
-describe("mediaUrl", () => {
-  const CAST = "http://192.168.0.13:8081";
+/* The bug this exists to prevent: a browser that says it might play HLS, is
+   handed a playlist, cannot play it, and never fires an error - so the page
+   shows a player that sits at 0:00 for ever with nothing to react to. */
+describe("playsHlsNatively", () => {
+  const SAFARI_MAC =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
+  const SAFARI_IOS =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 Version/26.0 Mobile/15E148 Safari/604.1";
+  const CHROME_MAC =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
+  const FIREFOX_MAC =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0";
+  const CHROME_IOS =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/140.0 Mobile/15E148 Safari/604.1";
 
-  it("uses the cast address only when the page came from loopback", () => {
-    assert.equal(
-      lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "127.0.0.1"),
-      "http://192.168.0.13:8081/api/play/abc/0/index.m3u8",
-    );
-    assert.equal(lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "localhost"),
-      "http://192.168.0.13:8081/api/play/abc/0/index.m3u8");
+  it("believes WebKit", () => {
+    assert.equal(lib.playsHlsNatively(SAFARI_MAC, "maybe"), true);
+    assert.equal(lib.playsHlsNatively(SAFARI_IOS, "maybe"), true);
+    // Every iPhone browser is WebKit underneath, whatever the badge says.
+    assert.equal(lib.playsHlsNatively(CHROME_IOS, "maybe"), true);
   });
 
-  it("leaves the path alone when the page came from anywhere else", () => {
-    // The tunnel, which is how a phone reaches an always-on machine.
-    assert.equal(
-      lib.mediaUrl("/api/play/abc/0/index.m3u8", CAST, "pepe-thinkpad.tailb0627.ts.net"),
-      "/api/play/abc/0/index.m3u8",
-    );
-    // And a LAN address, which is reachable but is not necessarily the same
-    // LAN as the cast server's.
-    assert.equal(lib.mediaUrl("/stream/abc/0", CAST, "100.83.44.63"), "/stream/abc/0");
+  it("does not believe desktop Chrome, which says maybe and cannot", () => {
+    assert.equal(lib.playsHlsNatively(CHROME_MAC, "maybe"), false);
   });
 
-  it("does not meddle with an address somebody has already decided", () => {
-    assert.equal(
-      lib.mediaUrl("http://elsewhere/x.m3u8", CAST, "127.0.0.1"),
-      "http://elsewhere/x.m3u8",
-    );
+  it("does not believe a browser that did not even claim it", () => {
+    // Firefox is honest and answers "", which settles it on its own.
+    assert.equal(lib.playsHlsNatively(FIREFOX_MAC, ""), false);
+    assert.equal(lib.playsHlsNatively(SAFARI_MAC, ""), false);
   });
 
-  it("copes with no cast server and with nothing to play", () => {
-    assert.equal(lib.mediaUrl("/stream/abc/0", null, "127.0.0.1"), "/stream/abc/0");
-    assert.equal(lib.mediaUrl("", CAST, "127.0.0.1"), "");
-    assert.equal(lib.mediaUrl(null, CAST, "127.0.0.1"), null);
+  it("copes with no user agent at all", () => {
+    assert.equal(lib.playsHlsNatively(undefined, "maybe"), false);
+    assert.equal(lib.playsHlsNatively("", "maybe"), false);
   });
 });
 
